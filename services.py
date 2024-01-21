@@ -5,7 +5,7 @@ from typing import Optional, List, Type
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from database import DB_NAME, DB_USER, DB_HOST
+from database import DB_NAME, DB_USER, DB_HOST, DB_PASSWORD
 from models import User, File, Channel
 
 
@@ -104,7 +104,9 @@ def create_channel_from_db(db: Session, data: dict) -> Channel:
 def create_backup():
     time = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
     file_name = f"backup-{time}.sql"
+    os.environ["PGPASSWORD"] = DB_PASSWORD
     result = os.system(f"pg_dump -U {DB_USER} -h {DB_HOST} {DB_NAME} > {file_name}")
+    os.environ.pop("PGPASSWORD", None)
     dir_path = os.path.dirname(os.path.realpath(__file__))
     if result == 0:
         return f"{dir_path}/{file_name}"
