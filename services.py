@@ -2,6 +2,7 @@ import datetime
 import os
 from typing import Optional, List, Type
 
+from pyrogram.errors.exceptions.not_acceptable_406 import ChannelPrivate
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
@@ -118,7 +119,10 @@ async def channel_list(db, app):
     channels = read_channels_from_db(db)
     if channels:
         for channel in channels:
-            chnnael_data = await app.get_chat(channel.channel_id)
-            data[channel.channel_id] = {"title": chnnael_data.title, "link": channel.channel_link}
+            try:
+                chnnael_data = await app.get_chat(channel.channel_id)
+                data[channel.channel_id] = {"title": chnnael_data.title, "link": channel.channel_link}
+            except ChannelPrivate:
+                ...
         return data
     return 1
