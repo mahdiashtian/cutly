@@ -127,7 +127,6 @@ async def send_file(
         
         caption = (file.caption or "") + footer
         caption_used = False
-        keyboard_used = False
         sent_messages: List[Message] = []
         
         # Send grouped photos/videos together if present
@@ -138,24 +137,17 @@ async def send_file(
                     chat_id,
                     file=media_list,
                     caption=caption,
-                    buttons=keyboard if not fallback_pairs else None
                 )
                 caption_used = True
-                keyboard_used = not fallback_pairs and keyboard is not None
             except Exception:
                 grouped_result = []
                 for idx, (album_file, input_media) in enumerate(grouped_pairs):
                     msg_caption = caption if not caption_used else None
-                    msg_keyboard = None
-                    if not keyboard_used and not fallback_pairs and idx == len(grouped_pairs) - 1:
-                        msg_keyboard = keyboard
-                        keyboard_used = True
                     try:
                         msg = await client.send_file(
                             chat_id,
                             file=input_media,
                             caption=msg_caption,
-                            buttons=msg_keyboard
                         )
                         caption_used = caption_used or msg_caption is not None
                         grouped_result.append(msg)
@@ -170,15 +162,10 @@ async def send_file(
         # Send fallback media (audio/voice/documents) individually
         for idx, (album_file, input_media) in enumerate(fallback_pairs):
             msg_caption = caption if not caption_used else None
-            msg_keyboard = None
-            if not keyboard_used and idx == len(fallback_pairs) - 1:
-                msg_keyboard = keyboard
-                keyboard_used = True
             msg = await client.send_file(
                 chat_id,
                 file=input_media,
                 caption=msg_caption,
-                buttons=msg_keyboard
             )
             caption_used = caption_used or msg_caption is not None
             sent_messages.append(msg)
@@ -215,7 +202,6 @@ async def send_file(
             chat_id,
             file=input_file,
             caption=caption,
-            buttons=keyboard
         )
         
         # Increment count after successful send
