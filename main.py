@@ -1039,6 +1039,7 @@ async def handle_file_history(event: events.NewMessage.Event) -> None:
                     "photo": "عکس",
                     "video": "ویدیو",
                     "voice": "صوتی",
+                    "audio": "آهنگ",
                     "document": "مدرک",
                 }
                 types_count: Counter[str] = Counter(type_labels.get(album_file.type, album_file.type) for album_file in album_files)
@@ -1052,6 +1053,7 @@ async def handle_file_history(event: events.NewMessage.Event) -> None:
                     "photo": ("📷", "عکس"),
                     "video": ("🎬", "ویدیو"),
                     "voice": ("🎤", "صوتی"),
+                    "audio": ("🎧", "آهنگ"),
                     "document": ("📄", "مدرک"),
                 }
                 icon, label = type_icons.get(file.type, ("📁", file.type))

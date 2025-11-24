@@ -99,61 +99,92 @@ async def send_file(
         # Retrieve all files in the album, ordered by album_order
         album_files = await File.filter(album_id=file.album_id).order_by("album_order")
         
-        # Prepare InputMedia list for album
-        media_list = []
+        # Separate media into groupable (photos/videos) and fallback (audio, document, ...)
+        grouped_pairs = []
+        fallback_pairs = []
         for album_file in album_files:
-            # Create appropriate InputMedia based on type
             if album_file.type == "photo":
-                input_file = InputPhoto(
+                input_media = InputPhoto(
                     id=album_file.file_id,
                     access_hash=album_file.access_hash,
                     file_reference=album_file.file_reference
                 )
-                media_list.append(input_file)
+                grouped_pairs.append((album_file, input_media))
+            elif album_file.type == "video":
+                input_media = InputDocument(
+                    id=album_file.file_id,
+                    access_hash=album_file.access_hash,
+                    file_reference=album_file.file_reference
+                )
+                grouped_pairs.append((album_file, input_media))
             else:
-                # For video, document, etc.
-                input_file = InputDocument(
+                input_media = InputDocument(
                     id=album_file.file_id,
                     access_hash=album_file.access_hash,
                     file_reference=album_file.file_reference
                 )
-                media_list.append(input_file)
+                fallback_pairs.append((album_file, input_media))
         
-        if not media_list:
-            raise ValueError("No valid media files in album")
-        
-        # Send as album using send_file with list of InputMedia
         caption = (file.caption or "") + footer
+        caption_used = False
+        keyboard_used = False
+        sent_messages: List[Message] = []
         
-        try:
-            sent_messages = await client.send_file(
+        # Send grouped photos/videos together if present
+        if grouped_pairs:
+            media_list = [media for _, media in grouped_pairs]
+            try:
+                grouped_result = await client.send_file(
+                    chat_id,
+                    file=media_list,
+                    caption=caption,
+                    buttons=keyboard if not fallback_pairs else None
+                )
+                caption_used = True
+                keyboard_used = not fallback_pairs and keyboard is not None
+            except Exception:
+                grouped_result = []
+                for idx, (album_file, input_media) in enumerate(grouped_pairs):
+                    msg_caption = caption if not caption_used else None
+                    msg_keyboard = None
+                    if not keyboard_used and not fallback_pairs and idx == len(grouped_pairs) - 1:
+                        msg_keyboard = keyboard
+                        keyboard_used = True
+                    try:
+                        msg = await client.send_file(
+                            chat_id,
+                            file=input_media,
+                            caption=msg_caption,
+                            buttons=msg_keyboard
+                        )
+                        caption_used = caption_used or msg_caption is not None
+                        grouped_result.append(msg)
+                    except Exception:
+                        continue
+            if grouped_result:
+                if isinstance(grouped_result, list):
+                    sent_messages.extend(grouped_result)
+                else:
+                    sent_messages.append(grouped_result)
+        
+        # Send fallback media (audio/voice/documents) individually
+        for idx, (album_file, input_media) in enumerate(fallback_pairs):
+            msg_caption = caption if not caption_used else None
+            msg_keyboard = None
+            if not keyboard_used and idx == len(fallback_pairs) - 1:
+                msg_keyboard = keyboard
+                keyboard_used = True
+            msg = await client.send_file(
                 chat_id,
-                file=media_list,  # List of InputPhoto/InputDocument
-                caption=caption,
-                buttons=keyboard
+                file=input_media,
+                caption=msg_caption,
+                buttons=msg_keyboard
             )
-        except Exception as e:
-            # If album sending fails, try one by one
-            sent_messages = []
-            for idx, (input_file, album_file) in enumerate(zip(media_list, album_files)):
-                msg_caption = caption if idx == 0 else None
-                msg_keyboard = keyboard if idx == len(media_list) - 1 else None
-                
-                try:
-                    msg = await client.send_file(
-                        chat_id,
-                        file=input_file,
-                        caption=msg_caption,
-                        buttons=msg_keyboard
-                    )
-                    sent_messages.append(msg)
-                except Exception as e2:
-                    # Log error but continue
-                    pass
+            caption_used = caption_used or msg_caption is not None
+            sent_messages.append(msg)
         
-        # Ensure we have a list
-        if not isinstance(sent_messages, list):
-            sent_messages = [sent_messages]
+        if not grouped_pairs and not fallback_pairs:
+            raise ValueError("No valid media files in album")
         
         # Increment count for each file in album
         for album_file in album_files:
