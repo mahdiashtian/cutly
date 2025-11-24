@@ -1928,6 +1928,7 @@ async def handle_finish_upload(event: events.NewMessage.Event) -> None:
                 summary['photos'],
                 summary['videos'],
                 summary['voices'],
+                summary['audios'],
                 summary['documents'],
                 summary['total_size_mb'],
                 BOT_USERNAME,

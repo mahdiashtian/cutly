@@ -101,6 +101,7 @@ class UploadSession:
         photos = sum(1 for f in self.files if f.media_type == 'photo')
         videos = sum(1 for f in self.files if f.media_type == 'video')
         voices = sum(1 for f in self.files if f.media_type == 'voice')
+        audios = sum(1 for f in self.files if f.media_type == 'audio')
         documents = sum(1 for f in self.files if f.media_type == 'document')
         
         # Convert size to MB
@@ -110,6 +111,7 @@ class UploadSession:
             'photos': photos,
             'videos': videos,
             'voices': voices,
+            'audios': audios,
             'documents': documents,
             'total_count': len(self.files),
             'total_size_mb': total_size_mb,
