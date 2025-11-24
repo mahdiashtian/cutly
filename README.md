@@ -120,7 +120,7 @@ REDIS_DB=0
 REDIS_PASSWORD=  # Optional
 ```
 
-> 💡 **Performance Tip**: Enable Redis cache for 10-100x faster response times and ability to handle 1000+ concurrent users. See [REDIS_SETUP.md](REDIS_SETUP.md) for detailed setup guide.
+> 💡 **Performance Tip**: Enable Redis cache for 10-100x faster response times and ability to handle 1000+ concurrent users.
 
 ## 📚 Architecture
 
@@ -164,16 +164,6 @@ pip install -r requirements-dev.txt
 
 # Run with auto-reload
 watchdog main.py
-```
-
-## 🧪 Testing
-
-```bash
-# Run tests
-pytest
-
-# Run with coverage
-pytest --cov=app --cov=core --cov=services --cov=utils
 ```
 
 ## 📝 License
