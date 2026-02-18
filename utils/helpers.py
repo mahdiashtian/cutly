@@ -210,13 +210,12 @@ async def send_file(
         
         return [message]
 
-
 async def broadcast_to_users(
     client: TelegramClient,
     users: List[User],
     send_callback: Callable[[int], Any],
     *,
-    max_concurrent: int = 20,
+    max_concurrent: int = 10,
     delay_between_batches: float = 1.0,
 ) -> Tuple[int, int]:
     """Broadcast messages to multiple users with rate limiting.
@@ -225,8 +224,9 @@ async def broadcast_to_users(
         client: Active Telegram client.
         users: List of users to send messages to.
         send_callback: Async function that takes user_id and sends the message.
-        max_concurrent: Maximum number of concurrent sends (default: 20).
+        max_concurrent: Maximum number of concurrent sends (default: 10).
         delay_between_batches: Delay in seconds between batches (default: 1.0).
+            Note: This is not used in current implementation; consider adding batching if needed.
 
     Returns:
         Tuple of (successful_count, failed_count).
@@ -241,20 +241,39 @@ async def broadcast_to_users(
     success_count = 0
     failed_count = 0
 
-    async def send_with_limit(user: User) -> None:
+    async def send_with_limit(user: User, retry: bool = True) -> None:
         nonlocal success_count, failed_count
         async with semaphore:
             try:
                 await send_callback(user.userid)
                 success_count += 1
-            except Exception:  # noqa: BLE001
+            except FloodWaitError as e:
+                wait_time = max(30, e.seconds) + random.uniform(0, 5)
+                print(f"FloodWait detected for user {user.userid}: sleeping {wait_time}s")
+                await asyncio.sleep(wait_time)
+                if retry:
+                    await send_with_limit(user, retry=False)
+                else:
+                    failed_count += 1
+            except (UserIsBlockedError, PeerIdInvalidError):
                 failed_count += 1
-            # Small delay to avoid hitting rate limits
-            await asyncio.sleep(0.05)
+            except InvalidBufferError as e:
+                if "429" in str(e):
+                    wait_time = random.uniform(30, 60)
+                    print(f"429 Too Many Requests: sleeping {wait_time}s")
+                    await asyncio.sleep(wait_time)
+                    if not client.is_connected():
+                        await client.connect()
+                    await send_with_limit(user, retry=False)
+                else:
+                    failed_count += 1
+            except Exception as e:
+                failed_count += 1
+                print(f"Error for user {user.userid}: {e}")
+            finally:
+                await asyncio.sleep(0.5 + random.uniform(0, 0.5))
 
-    # Process users in batches
     tasks = [send_with_limit(user) for user in users]
     await asyncio.gather(*tasks, return_exceptions=True)
-    
-    return success_count, failed_count
 
+    return success_count, failed_count
