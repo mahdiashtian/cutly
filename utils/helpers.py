@@ -22,6 +22,13 @@ from telethon.utils import resolve_bot_file_id
 
 from core.models import File, User
 from utils.keyboard import KeyboardLayout
+import asyncio
+import random
+from typing import List, Callable, Tuple, Any
+from telethon import TelegramClient
+from telethon.errors import FloodWaitError
+from telethon.errors.rpcerrorlist import UserIsBlockedError, PeerIdInvalidError
+from telethon.errors.common import InvalidBufferError
 
 
 def generate_random_text(length: int = 15, existing_text: str = "") -> str:
@@ -210,70 +217,61 @@ async def send_file(
         
         return [message]
 
+
 async def broadcast_to_users(
     client: TelegramClient,
-    users: List[User],
+    users: List['User'],
     send_callback: Callable[[int], Any],
     *,
     max_concurrent: int = 10,
-    delay_between_batches: float = 1.0,
+    batch_size: int = 80,
+    delay_between_batches: float = 45.0,
 ) -> Tuple[int, int]:
-    """Broadcast messages to multiple users with rate limiting.
-
-    Args:
-        client: Active Telegram client.
-        users: List of users to send messages to.
-        send_callback: Async function that takes user_id and sends the message.
-        max_concurrent: Maximum number of concurrent sends (default: 10).
-        delay_between_batches: Delay in seconds between batches (default: 1.0).
-            Note: This is not used in current implementation; consider adding batching if needed.
-
-    Returns:
-        Tuple of (successful_count, failed_count).
-
-    Examples:
-        >>> async def send_msg(uid):
-        ...     await client.send_message(uid, "Hello")
-        >>> success, failed = await broadcast_to_users(client, users, send_msg)
-    """
-
     semaphore = asyncio.Semaphore(max_concurrent)
+    counter_lock = asyncio.Lock()
     success_count = 0
     failed_count = 0
 
-    async def send_with_limit(user: User, retry: bool = True) -> None:
+    async def send_with_limit(user: 'User', retry: bool = True) -> None:
         nonlocal success_count, failed_count
         async with semaphore:
             try:
                 await send_callback(user.userid)
-                success_count += 1
+                async with counter_lock:
+                    success_count += 1
             except FloodWaitError as e:
-                wait_time = max(30, e.seconds) + random.uniform(0, 5)
-                print(f"FloodWait detected for user {user.userid}: sleeping {wait_time}s")
+                wait_time = max(e.seconds, 30) + random.uniform(3, 10)
                 await asyncio.sleep(wait_time)
                 if retry:
                     await send_with_limit(user, retry=False)
                 else:
-                    failed_count += 1
+                    async with counter_lock:
+                        failed_count += 1
             except (UserIsBlockedError, PeerIdInvalidError):
-                failed_count += 1
+                async with counter_lock:
+                    failed_count += 1
             except InvalidBufferError as e:
                 if "429" in str(e):
-                    wait_time = random.uniform(30, 60)
-                    print(f"429 Too Many Requests: sleeping {wait_time}s")
+                    wait_time = random.uniform(45, 90)
                     await asyncio.sleep(wait_time)
-                    if not client.is_connected():
+                    if not await client.is_connected():
                         await client.connect()
-                    await send_with_limit(user, retry=False)
-                else:
+                    if retry:
+                        await send_with_limit(user, retry=False)
+                    return
+                async with counter_lock:
                     failed_count += 1
-            except Exception as e:
-                failed_count += 1
-                print(f"Error for user {user.userid}: {e}")
+            except Exception:
+                async with counter_lock:
+                    failed_count += 1
             finally:
-                await asyncio.sleep(0.5 + random.uniform(0, 0.5))
+                await asyncio.sleep(2.0 + random.uniform(0.6, 2.2))
 
-    tasks = [send_with_limit(user) for user in users]
-    await asyncio.gather(*tasks, return_exceptions=True)
+    for i in range(0, len(users), batch_size):
+        batch = users[i : i + batch_size]
+        tasks = [send_with_limit(user) for user in batch]
+        await asyncio.gather(*tasks, return_exceptions=True)
+        if i + batch_size < len(users):
+            await asyncio.sleep(delay_between_batches + random.uniform(-10, 15))
 
     return success_count, failed_count
