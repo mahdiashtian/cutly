@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import random
 import string
-from typing import Any, Callable, List, Tuple
+from typing import Any, Awaitable, Callable, List, Optional, Tuple
 
 from telethon.client.telegramclient import TelegramClient
 from telethon.tl.custom.message import Message
@@ -236,6 +237,8 @@ async def broadcast_to_users(
     batch_size: int = 50,
     delay_between_batches: float = 30.0,
     max_retries: int = 2,
+    cancel_event: Optional[asyncio.Event] = None,
+    on_delivery: Optional[Callable[[int, bool, Optional[str]], Awaitable[None] | None]] = None,
 ) -> Tuple[int, int]:
     """Send a message to every user without allowing one failure to stop a broadcast.
 
@@ -279,19 +282,36 @@ async def broadcast_to_users(
         LOGGER.warning("Broadcast to %s failed: %s", user.userid, error)
         async with counter_lock:
             failed_count += 1
+        await report_delivery(user.userid, False, str(error))
+
+    async def report_delivery(user_id: int, success: bool, error: Optional[str] = None) -> None:
+        if on_delivery is None:
+            return
+        try:
+            result = on_delivery(user_id, success, error)
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            # Progress/reporting failures must never change delivery results.
+            LOGGER.exception("Broadcast delivery reporter failed for %s", user_id)
 
     async def send_with_limit(user: 'User') -> None:
         nonlocal success_count, failed_count
         for attempt in range(max_retries + 1):
+            if cancel_event and cancel_event.is_set():
+                return
             await wait_for_flood_cooldown()
             try:
                 async with semaphore:
                     # A worker may have set a cooldown while this one was
                     # waiting for a permit, so check once more before sending.
                     await wait_for_flood_cooldown()
+                    if cancel_event and cancel_event.is_set():
+                        return
                     await send_callback(user.userid)
                 async with counter_lock:
                     success_count += 1
+                await report_delivery(user.userid, True)
                 return
             except FloodWaitError as error:
                 wait_time = await extend_flood_cooldown(
@@ -357,6 +377,8 @@ async def broadcast_to_users(
             await asyncio.sleep(2.0 + random.uniform(0.6, 2.2))
 
     for i in range(0, len(users), batch_size):
+        if cancel_event and cancel_event.is_set():
+            break
         batch = users[i : i + batch_size]
         tasks = [send_and_pace(user) for user in batch]
         await asyncio.gather(*tasks, return_exceptions=True)

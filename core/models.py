@@ -25,6 +25,7 @@ class User(Model):
     userid: int = fields.BigIntField(index=True, unique=True)
     phone_number: Optional[str] = fields.CharField(max_length=32, null=True)
     created_at = fields.DatetimeField(auto_now_add=True, index=True)  # Added index for sorting
+    last_activity_at = fields.DatetimeField(null=True)
     is_superuser: bool = fields.BooleanField(default=False, index=True)  # Index for admin queries
     is_staff: bool = fields.BooleanField(default=False, index=True)  # Index for admin queries
 
@@ -101,6 +102,8 @@ class File(Model):
     album_id: Optional[str] = fields.CharField(max_length=64, null=True, index=True)  # Group media
     album_order: int = fields.IntField(default=0)  # Order within album
     created_at = fields.DatetimeField(auto_now_add=True, index=True)  # Index for sorting
+    expires_at = fields.DatetimeField(null=True)
+    max_downloads: Optional[int] = fields.IntField(null=True)
 
     owner: fields.ForeignKeyRelation[User] = fields.ForeignKeyField(
         "models.User",  # Tortoise ORM app.Model format (app name is "models")
@@ -119,4 +122,45 @@ class File(Model):
             ("owner_id", "created_at"),  # User's files sorted by date
             ("type", "created_at"),  # Files by type and date
             ("album_id", "album_order"),  # Album files in order
+        ]
+
+
+class FileAccessLog(Model):
+    """A successful view of a shared file link by a Telegram user."""
+
+    id: int = fields.IntField(pk=True)
+    viewer_id: int = fields.BigIntField(index=True)
+    file_code: str = fields.CharField(max_length=32, index=True)
+    owner_id: int = fields.BigIntField(index=True)
+    accessed_at = fields.DatetimeField(auto_now_add=True, index=True)
+
+    class Meta:
+        table = "file_access_log"
+        indexes = [
+            ("viewer_id", "accessed_at"),
+            ("viewer_id", "file_code"),
+            ("file_code", "accessed_at"),
+        ]
+
+
+class BroadcastJob(Model):
+    """Stores outcomes of completed and scheduled admin broadcasts."""
+
+    id: int = fields.IntField(pk=True)
+    admin_id: int = fields.BigIntField(index=True)
+    delivery_type: str = fields.CharField(max_length=16)
+    audience: str = fields.CharField(max_length=128)
+    status: str = fields.CharField(max_length=16, default="scheduled", index=True)
+    total_count: int = fields.IntField(default=0)
+    success_count: int = fields.IntField(default=0)
+    failed_count: int = fields.IntField(default=0)
+    scheduled_at = fields.DatetimeField(null=True, index=True)
+    started_at = fields.DatetimeField(null=True)
+    completed_at = fields.DatetimeField(null=True)
+
+    class Meta:
+        table = "broadcast_job"
+        indexes = [
+            ("status", "scheduled_at"),
+            ("admin_id", "started_at"),
         ]

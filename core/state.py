@@ -26,4 +26,11 @@ class State(Enum):
     USER_JOIN_CHANNEL_PANEL = auto()
     USER_ADD_CHANNEL = auto()
     USER_REMOVE_CHANNEL = auto()
+    USER_SET_FILE_LIMITS = auto()
+    USER_BROADCAST_CONTENT = auto()
+    USER_BROADCAST_AUDIENCE = auto()
+    USER_BROADCAST_CHANNEL = auto()
+    USER_BROADCAST_SCHEDULE = auto()
+    USER_BROADCAST_CONFIRM = auto()
+    USER_ADMIN_USER_LOG = auto()
 

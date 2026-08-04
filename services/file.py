@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from core.models import File
@@ -112,4 +113,17 @@ async def read_file_from_db(code: str, userid: Optional[int] = None) -> Optional
     if userid is not None:
         queryset = queryset.filter(owner_id=userid)
     return await queryset.first()
+
+
+def file_access_error(file: File) -> Optional[str]:
+    """Return a Persian reason when a file link may no longer be downloaded."""
+    if file.expires_at:
+        expires_at = file.expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) >= expires_at:
+            return "⏰ زمان اعتبار این لینک به پایان رسیده است."
+    if file.max_downloads is not None and file.count >= file.max_downloads:
+        return "🚫 سقف دانلود این لینک پر شده است."
+    return None
 

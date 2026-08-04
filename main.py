@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import csv
+import io
 import logging
 import re
 from collections import Counter
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 from typing import Awaitable, Callable, Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 import uvloop
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from decouple import config
-from telethon import TelegramClient, events, types
+from telethon import Button, TelegramClient, events, types
 from telethon.errors import (
     ChannelInvalidError,
     ChannelPrivateError,
@@ -32,22 +37,29 @@ from telethon.tl.types import (
 from telethon.utils import pack_bot_file_id
 
 from core.database import close_db, init_db
-from core.models import File
+from core.models import File, User
 from core.state import State
 from core.upload_session import get_upload_manager
 from services import (
     change_admin_from_db,
+    create_broadcast_job,
     create_backup,
     create_channel_from_db,
     create_file_from_db,
     create_user_from_db,
     delete_channel_from_db,
     delete_file_from_db,
+    file_access_error,
+    finish_broadcast_job,
+    get_dashboard_statistics,
+    get_user_access_page,
+    record_file_access,
     read_channels_from_db,
     read_file_from_db,
     read_files_from_db,
     read_user_from_db,
     read_users,
+    touch_user_activity,
     userid_list,
 )
 from utils.filters import admin_filter, compose_filters, conversation, private_only
@@ -55,6 +67,9 @@ from utils.helpers import broadcast_to_users, generate_random_text, send_file
 from utils.keyboard import (
     ADMIN_KEYBOARD,
     BACK_KEYBOARD,
+    BROADCAST_AUDIENCE_KEYBOARD,
+    BROADCAST_CONFIRM_KEYBOARD,
+    FILE_LIMIT_KEYBOARD,
     JOIN_KEYBOARD,
     START_KEYBOARD,
     UPLOAD_SESSION_KEYBOARD,
@@ -127,6 +142,23 @@ BOT_USERNAME: str = ""
 SCHEDULER = AsyncIOScheduler()
 ADMIN_PREDICATE = admin_filter(ADMIN_MASTER)
 BROADCAST_IN_PROGRESS = False
+BROADCAST_CANCEL_EVENT: Optional[asyncio.Event] = None
+
+
+@dataclass
+class BroadcastDraft:
+    """A pending admin broadcast, held until confirmation or scheduled run."""
+
+    admin_id: int
+    message: TelethonMessage
+    delivery_type: str
+    audience: str = "همه کاربران"
+    users: List[User] = field(default_factory=list)
+    scheduled_at: Optional[datetime] = None
+
+
+BROADCAST_DRAFTS: Dict[int, BroadcastDraft] = {}
+ADMIN_LOG_CONTEXT: Dict[int, int] = {}
 USER_COMMANDS = {
     "/start",
     "🗳 آپلود فایل",
@@ -149,6 +181,16 @@ USER_COMMANDS = {
     "👤 افزودن ادمین",
     "📈آمار",
     "🔌بک آپ",
+    "📜 لاگ کاربر",
+    "👥 همه کاربران",
+    "🆕 کاربران جدید",
+    "🟢 کاربران فعال",
+    "⚪ کاربران غیرفعال",
+    "📢 اعضای کانال",
+    "✅ ارسال فوری",
+    "🗓 زمان‌بندی ارسال",
+    "❌ لغو ارسال",
+    "بدون محدودیت",
     "🔸 لیست کانال ها",
     "▫️ اضافه کردن کانال",
     "▪️ حذف کانال",
@@ -162,6 +204,13 @@ ADMIN_CONTEXT_STATES = {
     State.USER_JOIN_CHANNEL_PANEL,
     State.USER_ADD_CHANNEL,
     State.USER_REMOVE_CHANNEL,
+    State.USER_SET_FILE_LIMITS,
+    State.USER_BROADCAST_CONTENT,
+    State.USER_BROADCAST_AUDIENCE,
+    State.USER_BROADCAST_CHANNEL,
+    State.USER_BROADCAST_SCHEDULE,
+    State.USER_BROADCAST_CONFIRM,
+    State.USER_ADMIN_USER_LOG,
 }
 def is_user_command(text: Optional[str]) -> bool:
     """Return True when the incoming text matches any command/keyboard label."""
@@ -350,6 +399,16 @@ async def ensure_user_record(user_id: int) -> None:
     elif user_id not in USER_LIST:
         # User exists in DB but not in memory list - add to list
         USER_LIST.append(user_id)
+    await touch_user_activity(user_id)
+
+
+async def ensure_file_is_available(event: events.NewMessage.Event, file: File) -> bool:
+    """Tell a requester why an expired or exhausted link cannot be delivered."""
+    error = file_access_error(file)
+    if not error:
+        return True
+    await event.client.send_message(event.sender_id, error, buttons=START_KEYBOARD)
+    return False
 
 
 async def enforce_channel_membership(event: events.NewMessage.Event) -> bool:
@@ -552,6 +611,8 @@ async def handle_get_file(event: events.NewMessage.Event) -> None:
         sender = await event.get_sender()
         await send_user_menu(event.client, event.sender_id, get_display_name(sender))
         raise events.StopPropagation
+    if not await ensure_file_is_available(event, file):
+        raise events.StopPropagation
     if not file.password or file.owner_id == event.sender_id:
         messages = await send_file(
             event.client,
@@ -565,6 +626,7 @@ async def handle_get_file(event: events.NewMessage.Event) -> None:
         for message in messages:
             if message:
                 LIST_VIDEO.append({"chat_id": message.chat_id, "message_id": message.id})
+        await record_file_access(event.sender_id, file)
         return
     CONVERSATION_OBJECT[event.sender_id] = file
     set_state(event.sender_id, State.USER_SEND_PASSWORD_FOR_GET_FILE)
@@ -795,14 +857,111 @@ async def handle_backup(event: events.NewMessage.Event) -> None:
 async def handle_status(event: events.NewMessage.Event) -> None:
     """Display usage statistics."""
 
-    users = await read_users()
-    files = await read_files_from_db()
+    stats = await get_dashboard_statistics()
     text = (
-        "📊 آمار ربات : \n\n"
-        f"👥 تعداد کاربران : {len(users)} \n"
-        f"📤 تعداد فایل های آپلود شده : {len(files)}"
+        "📊 آمار ربات\n\n"
+        f"👥 کاربران: {stats['total_users']:,}\n"
+        f"🆕 کاربر جدید ۲۴ ساعت اخیر: {stats['new_today']:,}\n"
+        f"📈 رشد هفتگی: {stats['week_growth']:+,}\n"
+        f"📤 فایل‌ها: {stats['total_files']:,} (امروز: {stats['files_today']:,})\n"
+        f"👁 دانلودها: {stats['downloads']:,}\n"
+        f"🔗 بازدید لینک امروز: {stats['views_today']:,}\n"
+        f"📨 ارسال‌های همگانی: {stats['broadcasts']:,}\n"
+        f"✅ نرخ موفقیت ارسال: {stats['delivery_rate']:.1f}%"
     )
     await event.client.send_message(event.sender_id, text, buttons=ADMIN_KEYBOARD)
+
+
+async def render_user_access_log(
+    client: TelegramClient,
+    admin_id: int,
+    target_user_id: int,
+    page: int,
+    *,
+    edit_event: Optional[events.CallbackQuery.Event] = None,
+) -> None:
+    """Render a paginated list of the links viewed by one user."""
+    page_size = 10
+    rows, total, user = await get_user_access_page(target_user_id, page, page_size)
+    if not user:
+        text = "❌ کاربری با این شناسه در دیتابیس پیدا نشد."
+        buttons = None
+    elif not total:
+        text = f"📜 لاگ کاربر `{target_user_id}`\n\nهنوز هیچ لینک فایلی را مشاهده نکرده است."
+        buttons = None
+    else:
+        page_count = max(1, (total + page_size - 1) // page_size)
+        safe_page = min(max(page, 0), page_count - 1)
+        lines = [
+            f"📜 لاگ بازدید کاربر `{target_user_id}`",
+            f"📅 ثبت‌نام: {user.created_at.strftime('%Y/%m/%d %H:%M')}",
+            f"🟢 آخرین فعالیت: {user.last_activity_at.strftime('%Y/%m/%d %H:%M') if user.last_activity_at else 'ندارد'}",
+            f"🔗 {total:,} لینک یکتا | صفحه {safe_page + 1} از {page_count}",
+            "━━━━━━━━━━━━━━━━━━━━",
+        ]
+        for index, row in enumerate(rows, start=safe_page * page_size + 1):
+            last_viewed = row["last_viewed"].strftime("%Y/%m/%d %H:%M")
+            lines.extend([
+                f"{index}. کد: `{row['file_code']}`",
+                f"   👁 مشاهده: {row['view_count']:,} بار",
+                f"   🕓 آخرین بازدید: {last_viewed}",
+            ])
+        navigation = []
+        if safe_page > 0:
+            navigation.append(Button.inline("◀️ قبلی", data=f"userlog:{target_user_id}:{safe_page - 1}".encode()))
+        if safe_page + 1 < page_count:
+            navigation.append(Button.inline("بعدی ▶️", data=f"userlog:{target_user_id}:{safe_page + 1}".encode()))
+        buttons = [navigation] if navigation else None
+        text = "\n".join(lines)
+
+    if edit_event:
+        await edit_event.edit(text, buttons=buttons)
+        await edit_event.answer()
+    else:
+        await client.send_message(admin_id, text, buttons=buttons or ADMIN_KEYBOARD)
+
+
+@CLIENT.on(
+    events.NewMessage(
+        pattern=r"^📜 لاگ کاربر$",
+        func=compose_filters(private_only(), conversation(CONVERSATION_STATE, State.USER_ADMIN_PANEL), ADMIN_PREDICATE),
+    )
+)
+async def handle_user_log_prompt(event: events.NewMessage.Event) -> None:
+    """Ask an admin for the numeric ID whose link activity they need."""
+    set_state(event.sender_id, State.USER_ADMIN_USER_LOG)
+    await event.client.send_message(
+        event.sender_id,
+        "📜 شناسهٔ عددی کاربر را ارسال کنید.",
+        buttons=BACK_KEYBOARD,
+    )
+    raise events.StopPropagation
+
+
+@CLIENT.on(events.NewMessage(func=compose_filters(private_only(), conversation(CONVERSATION_STATE, State.USER_ADMIN_USER_LOG), ADMIN_PREDICATE)))
+async def handle_user_log_request(event: events.NewMessage.Event) -> None:
+    """Validate a user ID and show the first log page."""
+    try:
+        target_user_id = int((event.raw_text or "").strip())
+        if target_user_id <= 0:
+            raise ValueError
+    except ValueError:
+        await event.client.send_message(event.sender_id, "❌ شناسهٔ عددی معتبر نیست.", buttons=BACK_KEYBOARD)
+        return
+    ADMIN_LOG_CONTEXT[event.sender_id] = target_user_id
+    set_state(event.sender_id, State.USER_ADMIN_PANEL)
+    await render_user_access_log(event.client, event.sender_id, target_user_id, 0)
+    raise events.StopPropagation
+
+
+@CLIENT.on(events.CallbackQuery(pattern=rb"^userlog:(\d+):(\d+)$"))
+async def handle_user_log_page(event: events.CallbackQuery.Event) -> None:
+    """Navigate through a user's aggregated link-view log."""
+    if not await ADMIN_PREDICATE(event):
+        await event.answer("دسترسی ندارید.", alert=True)
+        return
+    target_user_id, page = (int(value) for value in event.pattern_match.groups())
+    await render_user_access_log(event.client, event.sender_id, target_user_id, page, edit_event=event)
 
 
 @CLIENT.on(
@@ -818,7 +977,12 @@ async def handle_status(event: events.NewMessage.Event) -> None:
 async def handle_forward_prompt(event: events.NewMessage.Event) -> None:
     """Ask admin for a broadcast message."""
 
-    set_state(event.sender_id, State.USER_FORWARD_MESSAGE_FOR_ALL)
+    BROADCAST_DRAFTS[event.sender_id] = BroadcastDraft(
+        admin_id=event.sender_id,
+        message=event.message,
+        delivery_type="forward",
+    )
+    set_state(event.sender_id, State.USER_BROADCAST_CONTENT)
     await event.client.send_message(
         event.sender_id,
         "📭 لطفا پیام خود را ارسال کنید ...",
@@ -840,7 +1004,12 @@ async def handle_forward_prompt(event: events.NewMessage.Event) -> None:
 async def handle_broadcast_prompt(event: events.NewMessage.Event) -> None:
     """Ask admin for a broadcast message."""
 
-    set_state(event.sender_id, State.USER_SEND_MESSAGE_FOR_ALL)
+    BROADCAST_DRAFTS[event.sender_id] = BroadcastDraft(
+        admin_id=event.sender_id,
+        message=event.message,
+        delivery_type="copy",
+    )
+    set_state(event.sender_id, State.USER_BROADCAST_CONTENT)
     await event.client.send_message(
         event.sender_id,
         "📬 لطفا پیام خود را ارسال کنید ...",
@@ -860,6 +1029,23 @@ async def handle_back(event: events.NewMessage.Event) -> None:
     if current_state in (State.USER_ADD_CHANNEL, State.USER_REMOVE_CHANNEL):
         set_state(event.sender_id, State.USER_JOIN_CHANNEL_PANEL)
         await send_join_menu(event.client, event.sender_id, get_display_name(sender))
+    elif current_state == State.USER_SET_FILE_LIMITS:
+        set_state(event.sender_id, State.USER_UPLOAD_FILE)
+        await event.client.send_message(
+            event.sender_id,
+            "فایل‌ها هنوز در جلسهٔ آپلود هستند؛ برای ادامه «✅ اتمام ارسال فایل» یا برای حذف «❌ لغو و بازگشت» را بزنید.",
+            buttons=UPLOAD_SESSION_KEYBOARD,
+        )
+    elif current_state in {
+        State.USER_BROADCAST_CONTENT,
+        State.USER_BROADCAST_AUDIENCE,
+        State.USER_BROADCAST_CHANNEL,
+        State.USER_BROADCAST_SCHEDULE,
+        State.USER_BROADCAST_CONFIRM,
+    }:
+        BROADCAST_DRAFTS.pop(event.sender_id, None)
+        set_state(event.sender_id, State.USER_ADMIN_PANEL)
+        await send_admin_menu(event.client, event.sender_id, get_display_name(sender))
     elif current_state in ADMIN_CONTEXT_STATES:
         set_state(event.sender_id, State.USER_ADMIN_PANEL)
         await send_admin_menu(event.client, event.sender_id, get_display_name(sender))
@@ -1074,6 +1260,8 @@ async def handle_file_history(event: events.NewMessage.Event) -> None:
                     f"• 💾 حجم: {size_display}",
                     f"• 📅 تاریخ: {date_str}",
                     f"• 👁 دانلود: {file.count} بار",
+                    f"• ⏰ اعتبار: {file.expires_at.strftime('%Y/%m/%d %H:%M') if file.expires_at else 'بدون انقضا'}",
+                    f"• 🎯 سقف دانلود: {file.max_downloads if file.max_downloads is not None else 'بدون محدودیت'}",
                     f"• 🔗 https://t.me/{BOT_USERNAME}?start=get_{file.code}",
                 ]
             )
@@ -1350,6 +1538,294 @@ async def handle_broadcast_message(event: events.NewMessage.Event) -> None:
     raise events.StopPropagation
 
 
+async def get_broadcast_audience(
+    client: TelegramClient, audience: str, channel_id: Optional[str] = None
+) -> List[User]:
+    """Resolve an audience just before previewing a broadcast."""
+    users = await read_users()
+    now = datetime.now(timezone.utc)
+
+    def as_utc(value: datetime) -> datetime:
+        return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+    if audience == "🆕 کاربران جدید":
+        return [user for user in users if as_utc(user.created_at) >= now - timedelta(days=7)]
+    if audience == "🟢 کاربران فعال":
+        return [
+            user for user in users
+            if user.last_activity_at and as_utc(user.last_activity_at) >= now - timedelta(days=30)
+        ]
+    if audience == "⚪ کاربران غیرفعال":
+        return [
+            user for user in users
+            if not user.last_activity_at or as_utc(user.last_activity_at) < now - timedelta(days=30)
+        ]
+    if audience != "📢 اعضای کانال" or not channel_id:
+        return users
+
+    semaphore = asyncio.Semaphore(5)
+
+    async def is_member(user: User) -> Optional[User]:
+        async with semaphore:
+            try:
+                await client.get_permissions(channel_id, user.userid)
+                return user
+            except Exception:
+                return None
+
+    results = await asyncio.gather(*(is_member(user) for user in users))
+    return [user for user in results if user is not None]
+
+
+async def show_broadcast_preview(event: events.NewMessage.Event, draft: BroadcastDraft) -> None:
+    """Resolve recipients and show the final send/schedule choice."""
+    draft.users = await get_broadcast_audience(event.client, draft.audience)
+    if not draft.users:
+        await event.client.send_message(
+            event.sender_id,
+            "❌ هیچ مخاطبی برای این دسته‌بندی پیدا نشد.",
+            buttons=BROADCAST_AUDIENCE_KEYBOARD,
+        )
+        set_state(event.sender_id, State.USER_BROADCAST_AUDIENCE)
+        return
+    set_state(event.sender_id, State.USER_BROADCAST_CONFIRM)
+    delivery_label = "فوروارد" if draft.delivery_type == "forward" else "کپی پیام"
+    await event.client.send_message(
+        event.sender_id,
+        "🔎 پیش‌نمایش ارسال همگانی\n\n"
+        f"📨 نوع: {delivery_label}\n"
+        f"🎯 مخاطب: {draft.audience}\n"
+        f"👥 تعداد دریافت‌کننده: {len(draft.users):,}\n\n"
+        "پیام موردنظر در پیام قبلی شماست. ارسال را تأیید یا زمان‌بندی کنید.",
+        buttons=BROADCAST_CONFIRM_KEYBOARD,
+    )
+
+
+@CLIENT.on(events.NewMessage(func=compose_filters(private_only(), conversation(CONVERSATION_STATE, State.USER_BROADCAST_CONTENT), ADMIN_PREDICATE)))
+async def handle_professional_broadcast_content(event: events.NewMessage.Event) -> None:
+    """Capture the source message for a new professional broadcast."""
+    draft = BROADCAST_DRAFTS.get(event.sender_id)
+    if not draft:
+        set_state(event.sender_id, State.USER_ADMIN_PANEL)
+        return
+    if event.message.grouped_id:
+        await event.client.send_message(event.sender_id, "❌ آلبوم در ارسال همگانی پشتیبانی نمی‌شود.", buttons=BACK_KEYBOARD)
+        return
+    draft.message = event.message
+    set_state(event.sender_id, State.USER_BROADCAST_AUDIENCE)
+    await event.client.send_message(
+        event.sender_id,
+        "🎯 مخاطبان این ارسال را انتخاب کنید:",
+        buttons=BROADCAST_AUDIENCE_KEYBOARD,
+    )
+    raise events.StopPropagation
+
+
+@CLIENT.on(events.NewMessage(func=compose_filters(private_only(), conversation(CONVERSATION_STATE, State.USER_BROADCAST_AUDIENCE), ADMIN_PREDICATE)))
+async def handle_broadcast_audience(event: events.NewMessage.Event) -> None:
+    """Choose the segment to which a broadcast is sent."""
+    draft = BROADCAST_DRAFTS.get(event.sender_id)
+    if not draft:
+        set_state(event.sender_id, State.USER_ADMIN_PANEL)
+        return
+    audience = (event.raw_text or "").strip()
+    if audience not in {"👥 همه کاربران", "🆕 کاربران جدید", "🟢 کاربران فعال", "⚪ کاربران غیرفعال", "📢 اعضای کانال"}:
+        await event.client.send_message(event.sender_id, "❌ یکی از گزینه‌های مخاطبان را انتخاب کنید.", buttons=BROADCAST_AUDIENCE_KEYBOARD)
+        return
+    draft.audience = audience
+    if audience == "📢 اعضای کانال":
+        set_state(event.sender_id, State.USER_BROADCAST_CHANNEL)
+        await event.client.send_message(
+            event.sender_id,
+            "📢 شناسه یا یوزرنیم کانال را بفرستید؛ مانند `@channel` یا `-100...`.",
+            buttons=BACK_KEYBOARD,
+        )
+        return
+    await show_broadcast_preview(event, draft)
+    raise events.StopPropagation
+
+
+@CLIENT.on(events.NewMessage(func=compose_filters(private_only(), conversation(CONVERSATION_STATE, State.USER_BROADCAST_CHANNEL), ADMIN_PREDICATE)))
+async def handle_broadcast_channel(event: events.NewMessage.Event) -> None:
+    """Resolve channel members as the broadcast audience."""
+    draft = BROADCAST_DRAFTS.get(event.sender_id)
+    channel_id = (event.raw_text or "").strip()
+    if not draft or not channel_id:
+        return
+    try:
+        draft.users = await get_broadcast_audience(event.client, draft.audience, channel_id)
+    except Exception:
+        await event.client.send_message(event.sender_id, "❌ کانال بررسی نشد؛ شناسه را دوباره بفرستید.", buttons=BACK_KEYBOARD)
+        return
+    if not draft.users:
+        await event.client.send_message(event.sender_id, "❌ عضو قابل‌ارسالی در این کانال پیدا نشد.", buttons=BROADCAST_AUDIENCE_KEYBOARD)
+        set_state(event.sender_id, State.USER_BROADCAST_AUDIENCE)
+        return
+    set_state(event.sender_id, State.USER_BROADCAST_CONFIRM)
+    await event.client.send_message(
+        event.sender_id,
+        f"🔎 پیش‌نمایش ارسال\n📢 اعضای کانال: `{channel_id}`\n👥 دریافت‌کننده: {len(draft.users):,}",
+        buttons=BROADCAST_CONFIRM_KEYBOARD,
+    )
+
+
+async def execute_professional_broadcast(draft: BroadcastDraft) -> None:
+    """Run one confirmed or scheduled broadcast and send a CSV delivery report."""
+    global BROADCAST_IN_PROGRESS, BROADCAST_CANCEL_EVENT
+    while BROADCAST_IN_PROGRESS:
+        await asyncio.sleep(5)
+    BROADCAST_IN_PROGRESS = True
+    BROADCAST_CANCEL_EVENT = asyncio.Event()
+    outcomes: List[Tuple[int, str, str]] = []
+    progress_lock = asyncio.Lock()
+    job = None
+    status_message = None
+
+    async def update_delivery(user_id: int, success: bool, error: Optional[str]) -> None:
+        outcomes.append((user_id, "موفق" if success else "ناموفق", error or ""))
+        completed = len(outcomes)
+        if completed % 25 and completed != len(draft.users):
+            return
+        async with progress_lock:
+            try:
+                if not status_message:
+                    return
+                await CLIENT.edit_message(
+                    draft.admin_id,
+                    status_message.id,
+                    f"⏳ ارسال در حال انجام است: {completed:,} از {len(draft.users):,}\n"
+                    f"✅ موفق: {sum(1 for _, status, _ in outcomes if status == 'موفق'):,}\n"
+                    f"❌ ناموفق: {sum(1 for _, status, _ in outcomes if status == 'ناموفق'):,}",
+                )
+            except Exception:
+                LOGGER.debug("Unable to update broadcast progress", exc_info=True)
+
+    async def send_to_user(user_id: int) -> None:
+        if draft.delivery_type == "forward":
+            await CLIENT.forward_messages(user_id, draft.message, from_peer=draft.message.chat_id)
+        else:
+            await CLIENT.send_message(user_id, draft.message)
+
+    try:
+        job = await create_broadcast_job(
+            admin_id=draft.admin_id,
+            delivery_type=draft.delivery_type,
+            audience=draft.audience,
+            scheduled_at=draft.scheduled_at,
+        )
+        status_message = await CLIENT.send_message(
+            draft.admin_id,
+            f"⏳ ارسال آغاز شد: ۰ از {len(draft.users):,}\nبرای توقف، «❌ لغو ارسال» را بزنید.",
+        )
+        success, failed = await broadcast_to_users(
+            CLIENT,
+            draft.users,
+            send_to_user,
+            cancel_event=BROADCAST_CANCEL_EVENT,
+            on_delivery=update_delivery,
+        )
+        cancelled = BROADCAST_CANCEL_EVENT.is_set()
+        await finish_broadcast_job(
+            job,
+            total=len(draft.users),
+            success=success,
+            failed=failed,
+            cancelled=cancelled,
+        )
+        result_label = "⛔ ارسال لغو شد" if cancelled else "✅ ارسال پایان یافت"
+        await CLIENT.edit_message(
+            draft.admin_id,
+            status_message.id,
+            f"{result_label}\n✅ موفق: {success:,}\n❌ ناموفق: {failed:,}\n"
+            f"📊 پردازش‌شده: {success + failed:,} از {len(draft.users):,}",
+        )
+        report = io.StringIO()
+        writer = csv.writer(report)
+        writer.writerow(["user_id", "status", "error"])
+        writer.writerows(outcomes)
+        report_file = io.BytesIO(report.getvalue().encode("utf-8-sig"))
+        report_file.name = f"broadcast-report-{job.id}.csv"
+        await CLIENT.send_file(draft.admin_id, report_file, caption="📄 گزارش کامل ارسال همگانی")
+    except Exception:
+        LOGGER.exception("Professional broadcast failed")
+        await CLIENT.send_message(draft.admin_id, "❌ ارسال همگانی با خطا متوقف شد.", buttons=ADMIN_KEYBOARD)
+    finally:
+        BROADCAST_IN_PROGRESS = False
+        BROADCAST_CANCEL_EVENT = None
+        BROADCAST_DRAFTS.pop(draft.admin_id, None)
+
+
+@CLIENT.on(events.NewMessage(pattern=r"^✅ ارسال فوری$", func=compose_filters(private_only(), conversation(CONVERSATION_STATE, State.USER_BROADCAST_CONFIRM), ADMIN_PREDICATE)))
+async def handle_broadcast_confirm(event: events.NewMessage.Event) -> None:
+    """Start a confirmed broadcast."""
+    draft = BROADCAST_DRAFTS.get(event.sender_id)
+    if not draft:
+        return
+    if BROADCAST_IN_PROGRESS:
+        await event.client.send_message(
+            event.sender_id,
+            "⏳ یک ارسال همگانی دیگر در حال انجام است؛ کمی بعد دوباره تأیید کنید.",
+            buttons=BROADCAST_CONFIRM_KEYBOARD,
+        )
+        return
+    set_state(event.sender_id, State.USER_ADMIN_PANEL)
+    await execute_professional_broadcast(draft)
+    sender = await event.get_sender()
+    await send_admin_menu(event.client, event.sender_id, get_display_name(sender))
+    raise events.StopPropagation
+
+
+@CLIENT.on(events.NewMessage(pattern=r"^🗓 زمان‌بندی ارسال$", func=compose_filters(private_only(), conversation(CONVERSATION_STATE, State.USER_BROADCAST_CONFIRM), ADMIN_PREDICATE)))
+async def handle_broadcast_schedule_prompt(event: events.NewMessage.Event) -> None:
+    """Ask for a Tehran-local date and time for the saved broadcast."""
+    set_state(event.sender_id, State.USER_BROADCAST_SCHEDULE)
+    await event.client.send_message(
+        event.sender_id,
+        "🗓 زمان ارسال را با فرمت `YYYY-MM-DD HH:MM` و ساعت ایران بفرستید.\nنمونه: `2026-08-05 09:30`",
+        buttons=BACK_KEYBOARD,
+    )
+
+
+@CLIENT.on(events.NewMessage(func=compose_filters(private_only(), conversation(CONVERSATION_STATE, State.USER_BROADCAST_SCHEDULE), ADMIN_PREDICATE)))
+async def handle_broadcast_schedule(event: events.NewMessage.Event) -> None:
+    """Schedule a confirmed in-memory broadcast."""
+    draft = BROADCAST_DRAFTS.get(event.sender_id)
+    try:
+        scheduled_at = datetime.strptime((event.raw_text or "").strip(), "%Y-%m-%d %H:%M").replace(
+            tzinfo=ZoneInfo("Asia/Tehran")
+        )
+        if scheduled_at <= datetime.now(ZoneInfo("Asia/Tehran")):
+            raise ValueError
+    except ValueError:
+        await event.client.send_message(event.sender_id, "❌ زمان نامعتبر است یا در گذشته قرار دارد.", buttons=BACK_KEYBOARD)
+        return
+    if not draft:
+        return
+    draft.scheduled_at = scheduled_at.astimezone(timezone.utc)
+    SCHEDULER.add_job(execute_professional_broadcast, "date", run_date=draft.scheduled_at, args=[draft])
+    BROADCAST_DRAFTS.pop(event.sender_id, None)
+    set_state(event.sender_id, State.USER_ADMIN_PANEL)
+    await event.client.send_message(
+        event.sender_id,
+        f"✅ ارسال برای {scheduled_at.strftime('%Y/%m/%d %H:%M')} زمان‌بندی شد.",
+        buttons=ADMIN_KEYBOARD,
+    )
+
+
+@CLIENT.on(events.NewMessage(pattern=r"^❌ لغو ارسال$", func=compose_filters(private_only(), ADMIN_PREDICATE)))
+async def handle_broadcast_cancel(event: events.NewMessage.Event) -> None:
+    """Cancel a draft or request safe cancellation of the current broadcast."""
+    global BROADCAST_CANCEL_EVENT
+    BROADCAST_DRAFTS.pop(event.sender_id, None)
+    if BROADCAST_IN_PROGRESS and BROADCAST_CANCEL_EVENT:
+        BROADCAST_CANCEL_EVENT.set()
+        await event.client.send_message(event.sender_id, "⏳ درخواست لغو ثبت شد؛ ارسال‌های در صف متوقف می‌شوند.", buttons=ADMIN_KEYBOARD)
+    else:
+        set_state(event.sender_id, State.USER_ADMIN_PANEL)
+        await event.client.send_message(event.sender_id, "✅ ارسال لغو شد.", buttons=ADMIN_KEYBOARD)
+    raise events.StopPropagation
+
+
 @CLIENT.on(
     events.NewMessage(
         func=compose_filters(
@@ -1491,6 +1967,8 @@ async def handle_tracking_request(event: events.NewMessage.Event) -> None:
     lines.append(f"🗞 کپشن: {file.caption or 'ندارد'}")
     lines.append(f"🔐 رمز: {file.password or 'ندارد'}")
     lines.append(f"👁 دانلود: {file.count} بار")
+    lines.append(f"⏰ اعتبار لینک: {file.expires_at.strftime('%Y/%m/%d %H:%M') if file.expires_at else 'بدون انقضا'}")
+    lines.append(f"🎯 سقف دانلود: {file.max_downloads if file.max_downloads is not None else 'بدون محدودیت'}")
     lines.append(f"🕓 تاریخ آپلود: {file.created_at.strftime('%Y/%m/%d %H:%M')}\n")
     lines.append(f"📥 لینک اشتراک گذاری:\nhttps://t.me/{BOT_USERNAME}?start=get_{code}")
     
@@ -1514,6 +1992,9 @@ async def handle_passworded_file(event: events.NewMessage.Event) -> None:
         reset_context(event.sender_id)
         return
     if file.password == (event.raw_text or ""):
+        if not await ensure_file_is_available(event, file):
+            reset_context(event.sender_id)
+            raise events.StopPropagation
         messages = await send_file(
             event.client,
             event.chat_id,
@@ -1526,6 +2007,7 @@ async def handle_passworded_file(event: events.NewMessage.Event) -> None:
         for message in messages:
             if message:
                 LIST_VIDEO.append({"chat_id": message.chat_id, "message_id": message.id})
+        await record_file_access(event.sender_id, file)
         reset_context(event.sender_id)
         raise events.StopPropagation
     else:
@@ -1911,9 +2393,13 @@ async def handle_upload_file(event: events.NewMessage.Event) -> None:
         )
 
 
-@CLIENT.on(events.NewMessage(pattern=r"^✅ اتمام ارسال فایل$", func=compose_filters(private_only(), conversation(CONVERSATION_STATE, State.USER_UPLOAD_FILE))))
-async def handle_finish_upload(event: events.NewMessage.Event) -> None:
-    """Finish upload session and save all files to database."""
+async def finalize_upload(
+    event: events.NewMessage.Event,
+    *,
+    expires_at: Optional[datetime],
+    max_downloads: Optional[int],
+) -> None:
+    """Save an upload session after its per-link limits are chosen."""
 
     upload_manager = get_upload_manager()
     session = upload_manager.get_session(event.sender_id)
@@ -1950,6 +2436,8 @@ async def handle_finish_upload(event: events.NewMessage.Event) -> None:
                 "size": file_data.size,
                 "album_id": album_id,
                 "album_order": idx,
+                "expires_at": expires_at,
+                "max_downloads": max_downloads,
             }
             
             LOGGER.debug(f"File {idx}: type={file_dict['type']}, file_id={file_dict['file_id']}, "
@@ -1997,6 +2485,67 @@ async def handle_finish_upload(event: events.NewMessage.Event) -> None:
         reset_context(event.sender_id)
     
     raise events.StopPropagation
+
+
+@CLIENT.on(events.NewMessage(pattern=r"^✅ اتمام ارسال فایل$", func=compose_filters(private_only(), conversation(CONVERSATION_STATE, State.USER_UPLOAD_FILE))))
+async def handle_finish_upload(event: events.NewMessage.Event) -> None:
+    """Ask for this upload's expiration and download limit before saving."""
+    upload_manager = get_upload_manager()
+    session = upload_manager.get_session(event.sender_id)
+    if not session or not session.files:
+        await event.client.send_message(
+            event.sender_id,
+            "❌ هیچ فایلی برای ذخیره یافت نشد!",
+            buttons=START_KEYBOARD,
+        )
+        reset_context(event.sender_id)
+        raise events.StopPropagation
+
+    set_state(event.sender_id, State.USER_SET_FILE_LIMITS)
+    await event.client.send_message(
+        event.sender_id,
+        "🔐 محدودیت لینک را مشخص کنید.\n"
+        "فرمت: `تعداد_روز تعداد_دانلود`\n"
+        "نمونه: `7 3` (هفت روز یا سه دانلود؛ هرکدام زودتر برسد)\n"
+        "برای حذف هرکدام، به‌جای آن `-` بگذارید؛ نمونه: `7 -`.",
+        buttons=FILE_LIMIT_KEYBOARD,
+    )
+    raise events.StopPropagation
+
+
+@CLIENT.on(events.NewMessage(func=compose_filters(private_only(), conversation(CONVERSATION_STATE, State.USER_SET_FILE_LIMITS))))
+async def handle_file_limits(event: events.NewMessage.Event) -> None:
+    """Validate per-upload expiration and download limits, then persist files."""
+    text = (event.raw_text or "").strip()
+    if text == "بدون محدودیت":
+        await finalize_upload(event, expires_at=None, max_downloads=None)
+        return
+    parts = text.split()
+    if len(parts) != 2:
+        await event.client.send_message(
+            event.sender_id,
+            "❌ فرمت نادرست است. نمونه: `7 3` یا `7 -` یا «بدون محدودیت».",
+            buttons=FILE_LIMIT_KEYBOARD,
+        )
+        return
+    try:
+        days = None if parts[0] == "-" else int(parts[0])
+        downloads = None if parts[1] == "-" else int(parts[1])
+        if days is not None and days < 1:
+            raise ValueError
+        if downloads is not None and downloads < 1:
+            raise ValueError
+        if days is None and downloads is None:
+            raise ValueError
+    except ValueError:
+        await event.client.send_message(
+            event.sender_id,
+            "❌ تعداد روز و دانلود باید عدد مثبت باشند.",
+            buttons=FILE_LIMIT_KEYBOARD,
+        )
+        return
+    expires_at = datetime.now(timezone.utc) + timedelta(days=days) if days else None
+    await finalize_upload(event, expires_at=expires_at, max_downloads=downloads)
 
 
 @CLIENT.on(events.NewMessage(pattern=r"^❌ لغو و بازگشت$", func=compose_filters(private_only(), conversation(CONVERSATION_STATE, State.USER_UPLOAD_FILE))))

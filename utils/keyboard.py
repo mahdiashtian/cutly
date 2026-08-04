@@ -24,6 +24,7 @@ ADMIN_KEYBOARD: KeyboardLayout = [
     [Button.text("📭 فوروارد همگانی", resize=True), Button.text("📬 پیام همگانی", resize=True)],
     [Button.text("❌ حذف ادمین", resize=True), Button.text("👥 نمایش لیست ادمین ها", resize=True), Button.text("👤 افزودن ادمین", resize=True)],
     [Button.text("📈آمار", resize=True), Button.text("🔌بک آپ", resize=True)],
+    [Button.text("📜 لاگ کاربر", resize=True)],
 ]
 
 JOIN_KEYBOARD: KeyboardLayout = [
@@ -35,6 +36,23 @@ JOIN_KEYBOARD: KeyboardLayout = [
 UPLOAD_SESSION_KEYBOARD: KeyboardLayout = [
     [Button.text("✅ اتمام ارسال فایل", resize=True)],
     [Button.text("❌ لغو و بازگشت", resize=True)],
+]
+
+BROADCAST_AUDIENCE_KEYBOARD: KeyboardLayout = [
+    [Button.text("👥 همه کاربران", resize=True), Button.text("🆕 کاربران جدید", resize=True)],
+    [Button.text("🟢 کاربران فعال", resize=True), Button.text("⚪ کاربران غیرفعال", resize=True)],
+    [Button.text("📢 اعضای کانال", resize=True)],
+    [Button.text("🔙 بازگشت", resize=True)],
+]
+
+BROADCAST_CONFIRM_KEYBOARD: KeyboardLayout = [
+    [Button.text("✅ ارسال فوری", resize=True), Button.text("🗓 زمان‌بندی ارسال", resize=True)],
+    [Button.text("❌ لغو ارسال", resize=True)],
+]
+
+FILE_LIMIT_KEYBOARD: KeyboardLayout = [
+    [Button.text("بدون محدودیت", resize=True)],
+    [Button.text("🔙 بازگشت", resize=True)],
 ]
 
 

@@ -1,6 +1,14 @@
 """Service layer for business logic."""
 
 from services.backup import create_backup
+from services.analytics import (
+    create_broadcast_job,
+    finish_broadcast_job,
+    get_dashboard_statistics,
+    get_user_access_page,
+    record_file_access,
+    touch_user_activity,
+)
 from services.channel import (
     create_channel_from_db,
     delete_channel_from_db,
@@ -9,6 +17,7 @@ from services.channel import (
 from services.file import (
     create_file_from_db,
     delete_file_from_db,
+    file_access_error,
     read_file_from_db,
     read_files_from_db,
 )
@@ -23,6 +32,13 @@ from services.user import (
 __all__ = [
     # Backup
     "create_backup",
+    # Analytics
+    "create_broadcast_job",
+    "finish_broadcast_job",
+    "get_dashboard_statistics",
+    "get_user_access_page",
+    "record_file_access",
+    "touch_user_activity",
     # Channel
     "create_channel_from_db",
     "delete_channel_from_db",
@@ -30,6 +46,7 @@ __all__ = [
     # File
     "create_file_from_db",
     "delete_file_from_db",
+    "file_access_error",
     "read_file_from_db",
     "read_files_from_db",
     # User
