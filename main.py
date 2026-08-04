@@ -126,6 +126,7 @@ CHANNEL_JOIN_LIST: Optional[Dict[str, Dict[str, str]]] = None
 BOT_USERNAME: str = ""
 SCHEDULER = AsyncIOScheduler()
 ADMIN_PREDICATE = admin_filter(ADMIN_MASTER)
+BROADCAST_IN_PROGRESS = False
 USER_COMMANDS = {
     "/start",
     "🗳 آپلود فایل",
@@ -1213,41 +1214,66 @@ async def handle_forward_message(event: events.NewMessage.Event) -> None:
 
     if is_user_command(event.raw_text):
         return
-    
+
+    if event.message.grouped_id:
+        await event.client.send_message(
+            event.sender_id,
+            "❌ ارسال همگانی آلبوم پشتیبانی نمی‌شود؛ لطفاً یک پیام یا فایل تکی بفرستید.",
+            buttons=BACK_KEYBOARD,
+        )
+        raise events.StopPropagation
+
+    global BROADCAST_IN_PROGRESS
+    if BROADCAST_IN_PROGRESS:
+        await event.client.send_message(
+            event.sender_id,
+            "⏳ یک ارسال همگانی در حال انجام است. پس از پایان آن دوباره تلاش کنید.",
+            buttons=BACK_KEYBOARD,
+        )
+        raise events.StopPropagation
+
+    BROADCAST_IN_PROGRESS = True
     set_state(event.sender_id, State.USER_ADMIN_PANEL)
-    users = await read_users()
-    
-    # Send status message
-    status_msg = await event.client.send_message(
-        event.sender_id,
-        f"⏳ در حال فوروارد به {len(users)} کاربر...",
-    )
-    
-    async def forward_to_user(user_id: int) -> None:
+    try:
+        users = await read_users()
+        status_msg = await event.client.send_message(
+            event.sender_id,
+            f"⏳ در حال فوروارد به {len(users)} کاربر...",
+        )
+
+        async def forward_to_user(user_id: int) -> None:
             await event.client.forward_messages(
-            user_id,
+                user_id,
                 messages=event.message,
                 from_peer=event.chat_id,
             )
-    
-    success, failed = await broadcast_to_users(
-        event.client,
-        users,
-        forward_to_user,
-    )
-    
-    # Reply to status message with result
-    await event.client.send_message(
-        event.sender_id,
-        f"✅ فوروارد انجام شد!\n"
-        f"📊 موفق: {success}\n"
-        f"❌ ناموفق: {failed}",
-        reply_to=status_msg.id,
-    )
-    
-    # Show admin panel again so user can continue
+
+        success, failed = await broadcast_to_users(
+            event.client,
+            users,
+            forward_to_user,
+        )
+
+        await event.client.send_message(
+            event.sender_id,
+            f"✅ فوروارد انجام شد!\n"
+            f"📊 موفق: {success}\n"
+            f"❌ ناموفق: {failed}",
+            reply_to=status_msg.id,
+        )
+    except Exception:
+        LOGGER.exception("Global forward failed to start or finish")
+        await event.client.send_message(
+            event.sender_id,
+            "❌ ارسال همگانی با خطا متوقف شد. لطفاً دوباره تلاش کنید.",
+            buttons=ADMIN_KEYBOARD,
+        )
+    finally:
+        BROADCAST_IN_PROGRESS = False
+
     sender = await event.get_sender()
     await send_admin_menu(event.client, event.sender_id, get_display_name(sender))
+    raise events.StopPropagation
 
 
 @CLIENT.on(
@@ -1264,47 +1290,64 @@ async def handle_broadcast_message(event: events.NewMessage.Event) -> None:
 
     if is_user_command(event.raw_text):
         return
-    
+
+    if event.message.grouped_id:
+        await event.client.send_message(
+            event.sender_id,
+            "❌ ارسال همگانی آلبوم پشتیبانی نمی‌شود؛ لطفاً یک پیام یا فایل تکی بفرستید.",
+            buttons=BACK_KEYBOARD,
+        )
+        raise events.StopPropagation
+
+    global BROADCAST_IN_PROGRESS
+    if BROADCAST_IN_PROGRESS:
+        await event.client.send_message(
+            event.sender_id,
+            "⏳ یک ارسال همگانی در حال انجام است. پس از پایان آن دوباره تلاش کنید.",
+            buttons=BACK_KEYBOARD,
+        )
+        raise events.StopPropagation
+
+    BROADCAST_IN_PROGRESS = True
     set_state(event.sender_id, State.USER_ADMIN_PANEL)
-    users = await read_users()
-    
-    # Send status message
-    status_msg = await event.client.send_message(
-        event.sender_id,
-        f"⏳ در حال ارسال به {len(users)} کاربر...",
-    )
-    
-    async def send_to_user(user_id: int) -> None:
-        if event.message.media:
-            await event.client.send_file(
-                user_id,
-                file=event.message.media,
-                caption=event.message.text or "",
-            )
-        else:
-            await event.client.send_message(
-                user_id,
-                event.message.text or "",
-            )
-    
-    success, failed = await broadcast_to_users(
-        event.client,
-        users,
-        send_to_user,
-    )
-    
-    # Reply to status message with result
-    await event.client.send_message(
-        event.sender_id,
-        f"✅ پیام ارسال شد!\n"
-        f"📊 موفق: {success}\n"
-        f"❌ ناموفق: {failed}",
-        reply_to=status_msg.id,
-    )
-    
-    # Show admin panel again so user can continue
+    try:
+        users = await read_users()
+        status_msg = await event.client.send_message(
+            event.sender_id,
+            f"⏳ در حال ارسال به {len(users)} کاربر...",
+        )
+
+        async def send_to_user(user_id: int) -> None:
+            # Telethon copies media, text entities and inline markup when a
+            # Message instance is supplied, unlike manually re-sending media.
+            await event.client.send_message(user_id, event.message)
+
+        success, failed = await broadcast_to_users(
+            event.client,
+            users,
+            send_to_user,
+        )
+
+        await event.client.send_message(
+            event.sender_id,
+            f"✅ پیام ارسال شد!\n"
+            f"📊 موفق: {success}\n"
+            f"❌ ناموفق: {failed}",
+            reply_to=status_msg.id,
+        )
+    except Exception:
+        LOGGER.exception("Global message broadcast failed to start or finish")
+        await event.client.send_message(
+            event.sender_id,
+            "❌ ارسال همگانی با خطا متوقف شد. لطفاً دوباره تلاش کنید.",
+            buttons=ADMIN_KEYBOARD,
+        )
+    finally:
+        BROADCAST_IN_PROGRESS = False
+
     sender = await event.get_sender()
     await send_admin_menu(event.client, event.sender_id, get_display_name(sender))
+    raise events.StopPropagation
 
 
 @CLIENT.on(

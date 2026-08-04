@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import random
 import string
 from typing import Any, Callable, List, Tuple
@@ -22,13 +23,21 @@ from telethon.utils import resolve_bot_file_id
 
 from core.models import File, User
 from utils.keyboard import KeyboardLayout
-import asyncio
-import random
-from typing import List, Callable, Tuple, Any
-from telethon import TelegramClient
-from telethon.errors import FloodWaitError
-from telethon.errors.rpcerrorlist import UserIsBlockedError, PeerIdInvalidError
+from telethon.errors import (
+    ChatWriteForbiddenError,
+    FloodWaitError,
+    InputUserDeactivatedError,
+    PeerIdInvalidError,
+    RpcCallFailError,
+    ServerError,
+    TimedOutError,
+    UserDeactivatedBanError,
+    UserDeactivatedError,
+    UserIsBlockedError,
+)
 from telethon.errors.common import InvalidBufferError
+
+LOGGER = logging.getLogger(__name__)
 
 
 def generate_random_text(length: int = 15, existing_text: str = "") -> str:
@@ -223,53 +232,133 @@ async def broadcast_to_users(
     users: List['User'],
     send_callback: Callable[[int], Any],
     *,
-    max_concurrent: int = 10,
-    batch_size: int = 80,
-    delay_between_batches: float = 45.0,
+    max_concurrent: int = 5,
+    batch_size: int = 50,
+    delay_between_batches: float = 30.0,
+    max_retries: int = 2,
 ) -> Tuple[int, int]:
+    """Send a message to every user without allowing one failure to stop a broadcast.
+
+    Flood waits are shared by all workers.  Retrying happens *after* a worker
+    releases the semaphore, which avoids deadlocking the whole broadcast when
+    several deliveries receive a FloodWait at once.
+    """
+    if max_concurrent < 1:
+        raise ValueError("max_concurrent must be at least 1")
+    if batch_size < 1:
+        raise ValueError("batch_size must be at least 1")
+    if max_retries < 0:
+        raise ValueError("max_retries cannot be negative")
+
     semaphore = asyncio.Semaphore(max_concurrent)
     counter_lock = asyncio.Lock()
+    flood_lock = asyncio.Lock()
+    flood_until = 0.0
     success_count = 0
     failed_count = 0
 
-    async def send_with_limit(user: 'User', retry: bool = True) -> None:
+    async def wait_for_flood_cooldown() -> None:
+        """Wait until a FloodWait raised by another worker has elapsed."""
+        while True:
+            async with flood_lock:
+                remaining = flood_until - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                return
+            await asyncio.sleep(remaining)
+
+    async def extend_flood_cooldown(seconds: float) -> float:
+        """Extend the global cooldown and return the time remaining to wait."""
+        nonlocal flood_until
+        async with flood_lock:
+            now = asyncio.get_running_loop().time()
+            flood_until = max(flood_until, now + seconds)
+            return max(0.0, flood_until - now)
+
+    async def mark_failed(user: 'User', error: Exception) -> None:
+        nonlocal failed_count
+        LOGGER.warning("Broadcast to %s failed: %s", user.userid, error)
+        async with counter_lock:
+            failed_count += 1
+
+    async def send_with_limit(user: 'User') -> None:
         nonlocal success_count, failed_count
-        async with semaphore:
+        for attempt in range(max_retries + 1):
+            await wait_for_flood_cooldown()
             try:
-                await send_callback(user.userid)
+                async with semaphore:
+                    # A worker may have set a cooldown while this one was
+                    # waiting for a permit, so check once more before sending.
+                    await wait_for_flood_cooldown()
+                    await send_callback(user.userid)
                 async with counter_lock:
                     success_count += 1
-            except FloodWaitError as e:
-                wait_time = max(e.seconds, 30) + random.uniform(3, 10)
-                await asyncio.sleep(wait_time)
-                if retry:
-                    await send_with_limit(user, retry=False)
-                else:
-                    async with counter_lock:
-                        failed_count += 1
-            except (UserIsBlockedError, PeerIdInvalidError):
-                async with counter_lock:
-                    failed_count += 1
-            except InvalidBufferError as e:
-                if "429" in str(e):
-                    wait_time = random.uniform(45, 90)
-                    await asyncio.sleep(wait_time)
-                    if not await client.is_connected():
-                        await client.connect()
-                    if retry:
-                        await send_with_limit(user, retry=False)
+                return
+            except FloodWaitError as error:
+                wait_time = await extend_flood_cooldown(
+                    max(error.seconds, 30) + random.uniform(3, 10)
+                )
+                LOGGER.warning(
+                    "Telegram requested a %.0f-second broadcast cooldown (user %s).",
+                    wait_time,
+                    user.userid,
+                )
+            except InvalidBufferError as error:
+                if "429" not in str(error):
+                    await mark_failed(user, error)
                     return
-                async with counter_lock:
-                    failed_count += 1
-            except Exception:
-                async with counter_lock:
-                    failed_count += 1
-            finally:
-                await asyncio.sleep(2.0 + random.uniform(0.6, 2.2))
+                wait_time = await extend_flood_cooldown(random.uniform(45, 90))
+                LOGGER.warning(
+                    "Telegram returned HTTP 429; pausing broadcast for %.0f seconds.",
+                    wait_time,
+                )
+            except (
+                UserIsBlockedError,
+                PeerIdInvalidError,
+                InputUserDeactivatedError,
+                UserDeactivatedError,
+                UserDeactivatedBanError,
+                ChatWriteForbiddenError,
+            ) as error:
+                await mark_failed(user, error)
+                return
+            except (asyncio.TimeoutError, OSError, TimedOutError, ServerError, RpcCallFailError) as error:
+                if attempt == max_retries:
+                    await mark_failed(user, error)
+                    return
+                retry_delay = min(5 * (attempt + 1), 15) + random.uniform(0.5, 2)
+                LOGGER.warning(
+                    "Temporary broadcast error for %s; retrying in %.1f seconds: %s",
+                    user.userid,
+                    retry_delay,
+                    error,
+                )
+                await asyncio.sleep(retry_delay)
+                continue
+            except Exception as error:
+                await mark_failed(user, error)
+                return
+
+            if attempt == max_retries:
+                await mark_failed(user, error)
+                return
+
+            # The cooldown is global, so this sleep lets other tasks observe
+            # it too, and (unlike recursive retries) holds no semaphore permit.
+            await asyncio.sleep(wait_time)
+
+        # This is only reachable when a retryable error exhausts its retries.
+        await mark_failed(user, RuntimeError("broadcast retries exhausted"))
+
+    async def send_and_pace(user: 'User') -> None:
+        try:
+            await send_with_limit(user)
+        finally:
+            # Keep a conservative per-delivery pace even after failures.
+            await asyncio.sleep(2.0 + random.uniform(0.6, 2.2))
 
     for i in range(0, len(users), batch_size):
         batch = users[i : i + batch_size]
-        tasks = [send_with_limit(user) for user in batch]
+        tasks = [send_and_pace(user) for user in batch]
         await asyncio.gather(*tasks, return_exceptions=True)
         if i + batch_size < len(users):
             await asyncio.sleep(delay_between_batches + random.uniform(-10, 15))
