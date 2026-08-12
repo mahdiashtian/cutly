@@ -36,7 +36,9 @@ async def get_user_access_page(
     )
     # Tortoise's ``count`` with ``GROUP BY`` is backend-dependent; retrieving
     # only the distinct code field gives a correct page count on both DBs.
-    total = len(await FileAccessLog.filter(viewer_id=user_id).values("file_code").distinct())
+    # ``distinct()`` must precede ``values()`` — ``ValuesQuery`` has no
+    # ``distinct()`` method of its own, only a ``distinct`` bool attribute.
+    total = len(await FileAccessLog.filter(viewer_id=user_id).distinct().values("file_code"))
     rows = await grouped.order_by("-last_viewed").offset(safe_page * page_size).limit(page_size).values(
         "file_code", "view_count", "last_viewed"
     )
