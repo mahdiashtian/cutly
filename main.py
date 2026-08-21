@@ -51,6 +51,7 @@ from services import (
     delete_file_from_db,
     file_access_error,
     finish_broadcast_job,
+    get_bot_settings,
     get_dashboard_statistics,
     get_user_access_page,
     record_file_access,
@@ -59,6 +60,8 @@ from services import (
     read_files_from_db,
     read_user_from_db,
     read_users,
+    set_global_caption,
+    set_show_file_captions,
     touch_user_activity,
     userid_list,
 )
@@ -70,6 +73,7 @@ from utils.keyboard import (
     BROADCAST_AUDIENCE_KEYBOARD,
     BROADCAST_CONFIRM_KEYBOARD,
     FILE_LIMIT_KEYBOARD,
+    GLOBAL_CAPTION_KEYBOARD,
     JOIN_KEYBOARD,
     START_KEYBOARD,
     UPLOAD_SESSION_KEYBOARD,
@@ -83,6 +87,7 @@ from utils.text import (
     delete_file_text,
     file_saved_in_session_text,
     get_file_text,
+    global_caption_panel_text,
     join_panel_text,
     need_join_text,
     start_text,
@@ -194,6 +199,10 @@ USER_COMMANDS = {
     "🔸 لیست کانال ها",
     "▫️ اضافه کردن کانال",
     "▪️ حذف کانال",
+    "🗞 کپشن عمومی",
+    "✏️ تنظیم کپشن عمومی",
+    "🗑 حذف کپشن عمومی",
+    "🔁 روشن/خاموش کپشن فایل‌ها",
 }
 ADMIN_CONTEXT_STATES = {
     State.USER_ADMIN_PANEL,
@@ -211,6 +220,7 @@ ADMIN_CONTEXT_STATES = {
     State.USER_BROADCAST_SCHEDULE,
     State.USER_BROADCAST_CONFIRM,
     State.USER_ADMIN_USER_LOG,
+    State.USER_GLOBAL_CAPTION_PANEL,
 }
 def is_user_command(text: Optional[str]) -> bool:
     """Return True when the incoming text matches any command/keyboard label."""
@@ -294,6 +304,19 @@ async def send_join_menu(client: TelegramClient, user_id: int, first_name: str) 
         user_id,
         join_panel_text.format(first_name),
         buttons=JOIN_KEYBOARD,
+    )
+
+
+async def send_global_caption_menu(client: TelegramClient, user_id: int, first_name: str) -> None:
+    """Display the global caption management keyboard with the current status."""
+
+    settings = await get_bot_settings()
+    caption_display = settings.global_caption or "تنظیم نشده"
+    status_display = "🟢 روشن" if settings.show_file_captions else "🔴 خاموش"
+    await client.send_message(
+        user_id,
+        global_caption_panel_text.format(first_name, caption_display, status_display),
+        buttons=GLOBAL_CAPTION_KEYBOARD,
     )
 
 
@@ -736,6 +759,87 @@ async def handle_join_panel(event: events.NewMessage.Event) -> None:
 
 @CLIENT.on(
     events.NewMessage(
+        pattern=r"^🗞 کپشن عمومی$",
+        func=compose_filters(
+            private_only(),
+            conversation(CONVERSATION_STATE, State.USER_ADMIN_PANEL),
+            ADMIN_PREDICATE,
+        ),
+    )
+)
+async def handle_global_caption_panel(event: events.NewMessage.Event) -> None:
+    """Show the global caption management panel."""
+
+    set_state(event.sender_id, State.USER_GLOBAL_CAPTION_PANEL)
+    sender = await event.get_sender()
+    await send_global_caption_menu(event.client, event.sender_id, get_display_name(sender))
+    raise events.StopPropagation
+
+
+@CLIENT.on(
+    events.NewMessage(
+        pattern=r"^✏️ تنظیم کپشن عمومی$",
+        func=compose_filters(
+            private_only(),
+            conversation(CONVERSATION_STATE, State.USER_GLOBAL_CAPTION_PANEL),
+            ADMIN_PREDICATE,
+        ),
+    )
+)
+async def handle_set_global_caption_prompt(event: events.NewMessage.Event) -> None:
+    """Prompt the admin for the new global caption text."""
+
+    set_state(event.sender_id, State.USER_SET_GLOBAL_CAPTION)
+    await event.client.send_message(
+        event.sender_id,
+        "📝 لطفا متن کپشن عمومی را ارسال کنید ...",
+        buttons=BACK_KEYBOARD,
+    )
+    raise events.StopPropagation
+
+
+@CLIENT.on(
+    events.NewMessage(
+        pattern=r"^🗑 حذف کپشن عمومی$",
+        func=compose_filters(
+            private_only(),
+            conversation(CONVERSATION_STATE, State.USER_GLOBAL_CAPTION_PANEL),
+            ADMIN_PREDICATE,
+        ),
+    )
+)
+async def handle_unset_global_caption(event: events.NewMessage.Event) -> None:
+    """Clear the global caption."""
+
+    await set_global_caption(None)
+    sender = await event.get_sender()
+    await event.client.send_message(event.sender_id, "✅ کپشن عمومی با موفقیت حذف شد !")
+    await send_global_caption_menu(event.client, event.sender_id, get_display_name(sender))
+    raise events.StopPropagation
+
+
+@CLIENT.on(
+    events.NewMessage(
+        pattern=r"^🔁 روشن/خاموش کپشن فایل‌ها$",
+        func=compose_filters(
+            private_only(),
+            conversation(CONVERSATION_STATE, State.USER_GLOBAL_CAPTION_PANEL),
+            ADMIN_PREDICATE,
+        ),
+    )
+)
+async def handle_toggle_show_file_captions(event: events.NewMessage.Event) -> None:
+    """Toggle whether each file's own caption is shown alongside the global one."""
+
+    settings = await get_bot_settings()
+    await set_show_file_captions(not settings.show_file_captions)
+    sender = await event.get_sender()
+    await send_global_caption_menu(event.client, event.sender_id, get_display_name(sender))
+    raise events.StopPropagation
+
+
+@CLIENT.on(
+    events.NewMessage(
         pattern=r"^👤 افزودن ادمین$",
         func=compose_filters(
             private_only(),
@@ -1029,6 +1133,9 @@ async def handle_back(event: events.NewMessage.Event) -> None:
     if current_state in (State.USER_ADD_CHANNEL, State.USER_REMOVE_CHANNEL):
         set_state(event.sender_id, State.USER_JOIN_CHANNEL_PANEL)
         await send_join_menu(event.client, event.sender_id, get_display_name(sender))
+    elif current_state == State.USER_SET_GLOBAL_CAPTION:
+        set_state(event.sender_id, State.USER_GLOBAL_CAPTION_PANEL)
+        await send_global_caption_menu(event.client, event.sender_id, get_display_name(sender))
     elif current_state == State.USER_SET_FILE_LIMITS:
         set_state(event.sender_id, State.USER_UPLOAD_FILE)
         await event.client.send_message(
@@ -2199,6 +2306,28 @@ async def handle_set_caption(event: events.NewMessage.Event) -> None:
         buttons=START_KEYBOARD,
     )
     reset_context(event.sender_id)
+    raise events.StopPropagation
+
+
+@CLIENT.on(
+    events.NewMessage(
+        func=compose_filters(
+            private_only(),
+            conversation(CONVERSATION_STATE, State.USER_SET_GLOBAL_CAPTION),
+            ADMIN_PREDICATE,
+        )
+    )
+)
+async def handle_set_global_caption(event: events.NewMessage.Event) -> None:
+    """Persist the admin-configured global caption."""
+
+    if is_user_command(event.raw_text):
+        return
+    await set_global_caption(event.raw_text or "")
+    sender = await event.get_sender()
+    await event.client.send_message(event.sender_id, "✅ کپشن عمومی با موفقیت ثبت شد !")
+    set_state(event.sender_id, State.USER_GLOBAL_CAPTION_PANEL)
+    await send_global_caption_menu(event.client, event.sender_id, get_display_name(sender))
     raise events.StopPropagation
 
 

@@ -21,6 +21,11 @@ from services.file import (
     read_file_from_db,
     read_files_from_db,
 )
+from services.settings import (
+    get_bot_settings,
+    set_global_caption,
+    set_show_file_captions,
+)
 from services.user import (
     change_admin_from_db,
     create_user_from_db,
@@ -49,6 +54,10 @@ __all__ = [
     "file_access_error",
     "read_file_from_db",
     "read_files_from_db",
+    # Settings
+    "get_bot_settings",
+    "set_global_caption",
+    "set_show_file_captions",
     # User
     "change_admin_from_db",
     "create_user_from_db",

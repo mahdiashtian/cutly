@@ -33,4 +33,6 @@ class State(Enum):
     USER_BROADCAST_SCHEDULE = auto()
     USER_BROADCAST_CONFIRM = auto()
     USER_ADMIN_USER_LOG = auto()
+    USER_GLOBAL_CAPTION_PANEL = auto()
+    USER_SET_GLOBAL_CAPTION = auto()
 

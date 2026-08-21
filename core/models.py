@@ -143,6 +143,27 @@ class FileAccessLog(Model):
         ]
 
 
+class BotSettings(Model):
+    """Singleton row storing bot-wide configuration toggles.
+
+    Attributes:
+        id: Primary key (a single row with id=1 is used).
+        global_caption: Caption prepended to every outgoing file, regardless
+            of whether the file also has its own caption.
+        show_file_captions: When False, only ``global_caption`` is shown and
+            each file's own caption is hidden.
+    """
+
+    id: int = fields.IntField(pk=True)
+    global_caption: Optional[str] = fields.TextField(null=True)
+    show_file_captions: bool = fields.BooleanField(default=True)
+
+    class Meta:
+        """Model metadata."""
+
+        table = "bot_settings"
+
+
 class BroadcastJob(Model):
     """Stores outcomes of completed and scheduled admin broadcasts."""
 

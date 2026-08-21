@@ -22,7 +22,8 @@ from telethon.tl.types import (
 )
 from telethon.utils import resolve_bot_file_id
 
-from core.models import File, User
+from core.models import BotSettings, File, User
+from services.settings import get_bot_settings
 from utils.keyboard import KeyboardLayout
 from telethon.errors import (
     ChatWriteForbiddenError,
@@ -39,6 +40,17 @@ from telethon.errors import (
 from telethon.errors.common import InvalidBufferError
 
 LOGGER = logging.getLogger(__name__)
+
+
+def build_file_caption(file_caption: Optional[str], settings: BotSettings) -> str:
+    """Combine a file's own caption with the admin-configured global caption.
+
+    The global caption always leads. The file's own caption is appended only
+    when ``settings.show_file_captions`` is enabled.
+    """
+
+    parts = [part for part in (settings.global_caption, file_caption if settings.show_file_captions else None) if part]
+    return "\n".join(parts)
 
 
 def generate_random_text(length: int = 15, existing_text: str = "") -> str:
@@ -110,7 +122,8 @@ async def send_file(
         f"\n👁 تعداد دانلود : {file.count + 1}\n"
         f"❌ این پیام بعد از ۳۰ ثانیه حذف می شود\n\n@{bot_username}"
     )
-    
+    settings = await get_bot_settings()
+
     # Check if this file is part of an album
     if file.album_id:
         # Retrieve all files in the album, ordered by album_order
@@ -142,7 +155,7 @@ async def send_file(
                 )
                 fallback_pairs.append((album_file, input_media))
         
-        caption = (file.caption or "") + footer
+        caption = build_file_caption(file.caption, settings) + footer
         caption_used = False
         sent_messages: List[Message] = []
         
@@ -212,8 +225,8 @@ async def send_file(
                 file_reference=file.file_reference
             )
         
-        caption = (file.caption or "") + footer
-        
+        caption = build_file_caption(file.caption, settings) + footer
+
         # Send the file using InputMedia
         message = await client.send_file(
             chat_id,

@@ -20,11 +20,17 @@ START_KEYBOARD: KeyboardLayout = [
 BACK_KEYBOARD: KeyboardLayout = [[Button.text("🔙 بازگشت", resize=True)]]
 
 ADMIN_KEYBOARD: KeyboardLayout = [
-    [Button.text("🎯 عضویت اجباری", resize=True)],
+    [Button.text("🎯 عضویت اجباری", resize=True), Button.text("🗞 کپشن عمومی", resize=True)],
     [Button.text("📭 فوروارد همگانی", resize=True), Button.text("📬 پیام همگانی", resize=True)],
     [Button.text("❌ حذف ادمین", resize=True), Button.text("👥 نمایش لیست ادمین ها", resize=True), Button.text("👤 افزودن ادمین", resize=True)],
     [Button.text("📈آمار", resize=True), Button.text("🔌بک آپ", resize=True)],
     [Button.text("📜 لاگ کاربر", resize=True)],
+]
+
+GLOBAL_CAPTION_KEYBOARD: KeyboardLayout = [
+    [Button.text("✏️ تنظیم کپشن عمومی", resize=True), Button.text("🗑 حذف کپشن عمومی", resize=True)],
+    [Button.text("🔁 روشن/خاموش کپشن فایل‌ها", resize=True)],
+    [Button.text("🔙 بازگشت", resize=True)],
 ]
 
 JOIN_KEYBOARD: KeyboardLayout = [
