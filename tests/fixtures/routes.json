@@ -1,0 +1,188 @@
+{
+  "handle_start": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='pattern', value=Constant(value='^/start$')), keyword(arg='func', value=Call(func=Name(id='private_only', ctx=Load())))])])"
+  ],
+  "handle_get_file": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='pattern', value=Constant(value='^/start get_(?P<code>[A-Za-z0-9]+)$')), keyword(arg='func', value=Call(func=Name(id='private_only', ctx=Load())))])])"
+  ],
+  "handle_admin_panel": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='pattern', value=Constant(value='^/admin$')), keyword(arg='func', value=Call(func=Name(id='compose_filters', ctx=Load()), args=[Call(func=Name(id='private_only', ctx=Load())), Name(id='ADMIN_PREDICATE', ctx=Load())]))])])"
+  ],
+  "handle_channel_list": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='pattern', value=Constant(value='^🔸 لیست کانال ها$')), keyword(arg='func', value=Call(func=Name(id='compose_filters', ctx=Load()), args=[Call(func=Name(id='private_only', ctx=Load())), Call(func=Name(id='conversation', ctx=Load()), args=[Name(id='CONVERSATION_STATE', ctx=Load()), Attribute(value=Name(id='State', ctx=Load()), attr='USER_JOIN_CHANNEL_PANEL', ctx=Load())]), Name(id='ADMIN_PREDICATE', ctx=Load())]))])])"
+  ],
+  "handle_add_channel_prompt": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='pattern', value=Constant(value='^▫️ اضافه کردن کانال$')), keyword(arg='func', value=Call(func=Name(id='compose_filters', ctx=Load()), args=[Call(func=Name(id='private_only', ctx=Load())), Call(func=Name(id='conversation', ctx=Load()), args=[Name(id='CONVERSATION_STATE', ctx=Load()), Attribute(value=Name(id='State', ctx=Load()), attr='USER_JOIN_CHANNEL_PANEL', ctx=Load())]), Name(id='ADMIN_PREDICATE', ctx=Load())]))])])"
+  ],
+  "handle_remove_channel_prompt": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='pattern', value=Constant(value='^▪️ حذف کانال$')), keyword(arg='func', value=Call(func=Name(id='compose_filters', ctx=Load()), args=[Call(func=Name(id='private_only', ctx=Load())), Call(func=Name(id='conversation', ctx=Load()), args=[Name(id='CONVERSATION_STATE', ctx=Load()), Attribute(value=Name(id='State', ctx=Load()), attr='USER_JOIN_CHANNEL_PANEL', ctx=Load())]), Name(id='ADMIN_PREDICATE', ctx=Load())]))])])"
+  ],
+  "handle_join_panel": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='pattern', value=Constant(value='^🎯 عضویت اجباری$')), keyword(arg='func', value=Call(func=Name(id='compose_filters', ctx=Load()), args=[Call(func=Name(id='private_only', ctx=Load())), Call(func=Name(id='conversation', ctx=Load()), args=[Name(id='CONVERSATION_STATE', ctx=Load()), Attribute(value=Name(id='State', ctx=Load()), attr='USER_ADMIN_PANEL', ctx=Load())]), Name(id='ADMIN_PREDICATE', ctx=Load())]))])])"
+  ],
+  "handle_global_caption_panel": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='pattern', value=Constant(value='^🗞 کپشن عمومی$')), keyword(arg='func', value=Call(func=Name(id='compose_filters', ctx=Load()), args=[Call(func=Name(id='private_only', ctx=Load())), Call(func=Name(id='conversation', ctx=Load()), args=[Name(id='CONVERSATION_STATE', ctx=Load()), Attribute(value=Name(id='State', ctx=Load()), attr='USER_ADMIN_PANEL', ctx=Load())]), Name(id='ADMIN_PREDICATE', ctx=Load())]))])])"
+  ],
+  "handle_set_global_caption_prompt": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='pattern', value=Constant(value='^✏️ تنظیم کپشن عمومی$')), keyword(arg='func', value=Call(func=Name(id='compose_filters', ctx=Load()), args=[Call(func=Name(id='private_only', ctx=Load())), Call(func=Name(id='conversation', ctx=Load()), args=[Name(id='CONVERSATION_STATE', ctx=Load()), Attribute(value=Name(id='State', ctx=Load()), attr='USER_GLOBAL_CAPTION_PANEL', ctx=Load())]), Name(id='ADMIN_PREDICATE', ctx=Load())]))])])"
+  ],
+  "handle_unset_global_caption": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='pattern', value=Constant(value='^🗑 حذف کپشن عمومی$')), keyword(arg='func', value=Call(func=Name(id='compose_filters', ctx=Load()), args=[Call(func=Name(id='private_only', ctx=Load())), Call(func=Name(id='conversation', ctx=Load()), args=[Name(id='CONVERSATION_STATE', ctx=Load()), Attribute(value=Name(id='State', ctx=Load()), attr='USER_GLOBAL_CAPTION_PANEL', ctx=Load())]), Name(id='ADMIN_PREDICATE', ctx=Load())]))])])"
+  ],
+  "handle_toggle_show_file_captions": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='pattern', value=Constant(value='^🔁 روشن/خاموش کپشن فایل\\u200cها$')), keyword(arg='func', value=Call(func=Name(id='compose_filters', ctx=Load()), args=[Call(func=Name(id='private_only', ctx=Load())), Call(func=Name(id='conversation', ctx=Load()), args=[Name(id='CONVERSATION_STATE', ctx=Load()), Attribute(value=Name(id='State', ctx=Load()), attr='USER_GLOBAL_CAPTION_PANEL', ctx=Load())]), Name(id='ADMIN_PREDICATE', ctx=Load())]))])])"
+  ],
+  "handle_set_admin_prompt": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='pattern', value=Constant(value='^👤 افزودن ادمین$')), keyword(arg='func', value=Call(func=Name(id='compose_filters', ctx=Load()), args=[Call(func=Name(id='private_only', ctx=Load())), Call(func=Name(id='conversation', ctx=Load()), args=[Name(id='CONVERSATION_STATE', ctx=Load()), Attribute(value=Name(id='State', ctx=Load()), attr='USER_ADMIN_PANEL', ctx=Load())]), Name(id='ADMIN_PREDICATE', ctx=Load())]))])])"
+  ],
+  "handle_unset_admin_prompt": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='pattern', value=Constant(value='^❌ حذف ادمین$')), keyword(arg='func', value=Call(func=Name(id='compose_filters', ctx=Load()), args=[Call(func=Name(id='private_only', ctx=Load())), Call(func=Name(id='conversation', ctx=Load()), args=[Name(id='CONVERSATION_STATE', ctx=Load()), Attribute(value=Name(id='State', ctx=Load()), attr='USER_ADMIN_PANEL', ctx=Load())]), Name(id='ADMIN_PREDICATE', ctx=Load())]))])])"
+  ],
+  "handle_admin_list": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='pattern', value=Constant(value='^👥 نمایش لیست ادمین ها$')), keyword(arg='func', value=Call(func=Name(id='compose_filters', ctx=Load()), args=[Call(func=Name(id='private_only', ctx=Load())), Call(func=Name(id='conversation', ctx=Load()), args=[Name(id='CONVERSATION_STATE', ctx=Load()), Attribute(value=Name(id='State', ctx=Load()), attr='USER_ADMIN_PANEL', ctx=Load())]), Name(id='ADMIN_PREDICATE', ctx=Load())]))])])"
+  ],
+  "handle_backup": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='pattern', value=Constant(value='^🔌بک آپ$')), keyword(arg='func', value=Call(func=Name(id='compose_filters', ctx=Load()), args=[Call(func=Name(id='private_only', ctx=Load())), Call(func=Name(id='conversation', ctx=Load()), args=[Name(id='CONVERSATION_STATE', ctx=Load()), Attribute(value=Name(id='State', ctx=Load()), attr='USER_ADMIN_PANEL', ctx=Load())]), Name(id='ADMIN_PREDICATE', ctx=Load())]))])])"
+  ],
+  "handle_status": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='pattern', value=Constant(value='^📈آمار$')), keyword(arg='func', value=Call(func=Name(id='compose_filters', ctx=Load()), args=[Call(func=Name(id='private_only', ctx=Load())), Call(func=Name(id='conversation', ctx=Load()), args=[Name(id='CONVERSATION_STATE', ctx=Load()), Attribute(value=Name(id='State', ctx=Load()), attr='USER_ADMIN_PANEL', ctx=Load())]), Name(id='ADMIN_PREDICATE', ctx=Load())]))])])"
+  ],
+  "handle_user_log_prompt": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='pattern', value=Constant(value='^📜 لاگ کاربر$')), keyword(arg='func', value=Call(func=Name(id='compose_filters', ctx=Load()), args=[Call(func=Name(id='private_only', ctx=Load())), Call(func=Name(id='conversation', ctx=Load()), args=[Name(id='CONVERSATION_STATE', ctx=Load()), Attribute(value=Name(id='State', ctx=Load()), attr='USER_ADMIN_PANEL', ctx=Load())]), Name(id='ADMIN_PREDICATE', ctx=Load())]))])])"
+  ],
+  "handle_user_log_request": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='func', value=Call(func=Name(id='compose_filters', ctx=Load()), args=[Call(func=Name(id='private_only', ctx=Load())), Call(func=Name(id='conversation', ctx=Load()), args=[Name(id='CONVERSATION_STATE', ctx=Load()), Attribute(value=Name(id='State', ctx=Load()), attr='USER_ADMIN_USER_LOG', ctx=Load())]), Name(id='ADMIN_PREDICATE', ctx=Load())]))])])"
+  ],
+  "handle_user_log_page": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='CallbackQuery', ctx=Load()), keywords=[keyword(arg='pattern', value=Constant(value=b'^userlog:(\\\\d+):(\\\\d+)$'))])])"
+  ],
+  "handle_forward_prompt": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='pattern', value=Constant(value='^📭 فوروارد همگانی$')), keyword(arg='func', value=Call(func=Name(id='compose_filters', ctx=Load()), args=[Call(func=Name(id='private_only', ctx=Load())), Call(func=Name(id='conversation', ctx=Load()), args=[Name(id='CONVERSATION_STATE', ctx=Load()), Attribute(value=Name(id='State', ctx=Load()), attr='USER_ADMIN_PANEL', ctx=Load())]), Name(id='ADMIN_PREDICATE', ctx=Load())]))])])"
+  ],
+  "handle_broadcast_prompt": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='pattern', value=Constant(value='^📬 پیام همگانی$')), keyword(arg='func', value=Call(func=Name(id='compose_filters', ctx=Load()), args=[Call(func=Name(id='private_only', ctx=Load())), Call(func=Name(id='conversation', ctx=Load()), args=[Name(id='CONVERSATION_STATE', ctx=Load()), Attribute(value=Name(id='State', ctx=Load()), attr='USER_ADMIN_PANEL', ctx=Load())]), Name(id='ADMIN_PREDICATE', ctx=Load())]))])])"
+  ],
+  "handle_back": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='pattern', value=Constant(value='^🔙 بازگشت$')), keyword(arg='func', value=Call(func=Name(id='private_only', ctx=Load())))])])"
+  ],
+  "handle_upload_prompt": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='pattern', value=Constant(value='^🗳 آپلود فایل$')), keyword(arg='func', value=Call(func=Name(id='private_only', ctx=Load())))])])"
+  ],
+  "handle_remove_prompt": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='pattern', value=Constant(value='^🗑 حذف فایل$')), keyword(arg='func', value=Call(func=Name(id='private_only', ctx=Load())))])])"
+  ],
+  "handle_set_caption_prompt": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='pattern', value=Constant(value='^📝 تنظیم کپشن$')), keyword(arg='func', value=Call(func=Name(id='private_only', ctx=Load())))])])"
+  ],
+  "handle_unset_caption_prompt": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='pattern', value=Constant(value='^🗞 حذف کپشن$')), keyword(arg='func', value=Call(func=Name(id='private_only', ctx=Load())))])])"
+  ],
+  "handle_set_password_prompt": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='pattern', value=Constant(value='^🔐 تنظیم پسورد$')), keyword(arg='func', value=Call(func=Name(id='private_only', ctx=Load())))])])"
+  ],
+  "handle_unset_password_prompt": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='pattern', value=Constant(value='^🗝 حذف پسورد$')), keyword(arg='func', value=Call(func=Name(id='private_only', ctx=Load())))])])"
+  ],
+  "handle_tracking_prompt": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='pattern', value=Constant(value='^🗂 شناسه پیگیری فایل$')), keyword(arg='func', value=Call(func=Name(id='private_only', ctx=Load())))])])"
+  ],
+  "handle_file_history": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='pattern', value=Constant(value='^📂 تاریخچه اپلود$')), keyword(arg='func', value=Call(func=Name(id='private_only', ctx=Load())))])])"
+  ],
+  "handle_account": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='pattern', value=Constant(value='^🎫 حساب کاربری$')), keyword(arg='func', value=Call(func=Name(id='private_only', ctx=Load())))])])"
+  ],
+  "handle_creator": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='pattern', value=Constant(value='^🛠 سازنده$')), keyword(arg='func', value=Call(func=Name(id='private_only', ctx=Load())))])])"
+  ],
+  "handle_add_channel": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='func', value=Call(func=Name(id='compose_filters', ctx=Load()), args=[Call(func=Name(id='private_only', ctx=Load())), Call(func=Name(id='conversation', ctx=Load()), args=[Name(id='CONVERSATION_STATE', ctx=Load()), Attribute(value=Name(id='State', ctx=Load()), attr='USER_ADD_CHANNEL', ctx=Load())]), Name(id='ADMIN_PREDICATE', ctx=Load())]))])])"
+  ],
+  "handle_remove_channel": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='func', value=Call(func=Name(id='compose_filters', ctx=Load()), args=[Call(func=Name(id='private_only', ctx=Load())), Call(func=Name(id='conversation', ctx=Load()), args=[Name(id='CONVERSATION_STATE', ctx=Load()), Attribute(value=Name(id='State', ctx=Load()), attr='USER_REMOVE_CHANNEL', ctx=Load())]), Name(id='ADMIN_PREDICATE', ctx=Load())]))])])"
+  ],
+  "handle_forward_message": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='func', value=Call(func=Name(id='compose_filters', ctx=Load()), args=[Call(func=Name(id='private_only', ctx=Load())), Call(func=Name(id='conversation', ctx=Load()), args=[Name(id='CONVERSATION_STATE', ctx=Load()), Attribute(value=Name(id='State', ctx=Load()), attr='USER_FORWARD_MESSAGE_FOR_ALL', ctx=Load())]), Name(id='ADMIN_PREDICATE', ctx=Load())]))])])"
+  ],
+  "handle_broadcast_message": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='func', value=Call(func=Name(id='compose_filters', ctx=Load()), args=[Call(func=Name(id='private_only', ctx=Load())), Call(func=Name(id='conversation', ctx=Load()), args=[Name(id='CONVERSATION_STATE', ctx=Load()), Attribute(value=Name(id='State', ctx=Load()), attr='USER_SEND_MESSAGE_FOR_ALL', ctx=Load())]), Name(id='ADMIN_PREDICATE', ctx=Load())]))])])"
+  ],
+  "handle_professional_broadcast_content": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='func', value=Call(func=Name(id='compose_filters', ctx=Load()), args=[Call(func=Name(id='private_only', ctx=Load())), Call(func=Name(id='conversation', ctx=Load()), args=[Name(id='CONVERSATION_STATE', ctx=Load()), Attribute(value=Name(id='State', ctx=Load()), attr='USER_BROADCAST_CONTENT', ctx=Load())]), Name(id='ADMIN_PREDICATE', ctx=Load())]))])])"
+  ],
+  "handle_broadcast_audience": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='func', value=Call(func=Name(id='compose_filters', ctx=Load()), args=[Call(func=Name(id='private_only', ctx=Load())), Call(func=Name(id='conversation', ctx=Load()), args=[Name(id='CONVERSATION_STATE', ctx=Load()), Attribute(value=Name(id='State', ctx=Load()), attr='USER_BROADCAST_AUDIENCE', ctx=Load())]), Name(id='ADMIN_PREDICATE', ctx=Load())]))])])"
+  ],
+  "handle_broadcast_channel": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='func', value=Call(func=Name(id='compose_filters', ctx=Load()), args=[Call(func=Name(id='private_only', ctx=Load())), Call(func=Name(id='conversation', ctx=Load()), args=[Name(id='CONVERSATION_STATE', ctx=Load()), Attribute(value=Name(id='State', ctx=Load()), attr='USER_BROADCAST_CHANNEL', ctx=Load())]), Name(id='ADMIN_PREDICATE', ctx=Load())]))])])"
+  ],
+  "handle_broadcast_confirm": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='pattern', value=Constant(value='^✅ ارسال فوری$')), keyword(arg='func', value=Call(func=Name(id='compose_filters', ctx=Load()), args=[Call(func=Name(id='private_only', ctx=Load())), Call(func=Name(id='conversation', ctx=Load()), args=[Name(id='CONVERSATION_STATE', ctx=Load()), Attribute(value=Name(id='State', ctx=Load()), attr='USER_BROADCAST_CONFIRM', ctx=Load())]), Name(id='ADMIN_PREDICATE', ctx=Load())]))])])"
+  ],
+  "handle_broadcast_schedule_prompt": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='pattern', value=Constant(value='^🗓 زمان\\u200cبندی ارسال$')), keyword(arg='func', value=Call(func=Name(id='compose_filters', ctx=Load()), args=[Call(func=Name(id='private_only', ctx=Load())), Call(func=Name(id='conversation', ctx=Load()), args=[Name(id='CONVERSATION_STATE', ctx=Load()), Attribute(value=Name(id='State', ctx=Load()), attr='USER_BROADCAST_CONFIRM', ctx=Load())]), Name(id='ADMIN_PREDICATE', ctx=Load())]))])])"
+  ],
+  "handle_broadcast_schedule": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='func', value=Call(func=Name(id='compose_filters', ctx=Load()), args=[Call(func=Name(id='private_only', ctx=Load())), Call(func=Name(id='conversation', ctx=Load()), args=[Name(id='CONVERSATION_STATE', ctx=Load()), Attribute(value=Name(id='State', ctx=Load()), attr='USER_BROADCAST_SCHEDULE', ctx=Load())]), Name(id='ADMIN_PREDICATE', ctx=Load())]))])])"
+  ],
+  "handle_broadcast_cancel": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='pattern', value=Constant(value='^❌ لغو ارسال$')), keyword(arg='func', value=Call(func=Name(id='compose_filters', ctx=Load()), args=[Call(func=Name(id='private_only', ctx=Load())), Name(id='ADMIN_PREDICATE', ctx=Load())]))])])"
+  ],
+  "handle_set_admin": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='func', value=Call(func=Name(id='compose_filters', ctx=Load()), args=[Call(func=Name(id='private_only', ctx=Load())), Call(func=Name(id='conversation', ctx=Load()), args=[Name(id='CONVERSATION_STATE', ctx=Load()), Attribute(value=Name(id='State', ctx=Load()), attr='USER_SET_ADMIN', ctx=Load())]), Name(id='ADMIN_PREDICATE', ctx=Load())]))])])"
+  ],
+  "handle_unset_admin": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='func', value=Call(func=Name(id='compose_filters', ctx=Load()), args=[Call(func=Name(id='private_only', ctx=Load())), Call(func=Name(id='conversation', ctx=Load()), args=[Name(id='CONVERSATION_STATE', ctx=Load()), Attribute(value=Name(id='State', ctx=Load()), attr='USER_UNSET_ADMIN', ctx=Load())]), Name(id='ADMIN_PREDICATE', ctx=Load())]))])])"
+  ],
+  "handle_tracking_request": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='func', value=Call(func=Name(id='compose_filters', ctx=Load()), args=[Call(func=Name(id='private_only', ctx=Load())), Call(func=Name(id='conversation', ctx=Load()), args=[Name(id='CONVERSATION_STATE', ctx=Load()), Attribute(value=Name(id='State', ctx=Load()), attr='USER_SEND_ID_FILE_FOR_TRACKING', ctx=Load())])]))])])"
+  ],
+  "handle_passworded_file": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='func', value=Call(func=Name(id='compose_filters', ctx=Load()), args=[Call(func=Name(id='private_only', ctx=Load())), Call(func=Name(id='conversation', ctx=Load()), args=[Name(id='CONVERSATION_STATE', ctx=Load()), Attribute(value=Name(id='State', ctx=Load()), attr='USER_SEND_PASSWORD_FOR_GET_FILE', ctx=Load())])]))])])"
+  ],
+  "handle_unset_password": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='func', value=Call(func=Name(id='compose_filters', ctx=Load()), args=[Call(func=Name(id='private_only', ctx=Load())), Call(func=Name(id='conversation', ctx=Load()), args=[Name(id='CONVERSATION_STATE', ctx=Load()), Attribute(value=Name(id='State', ctx=Load()), attr='USER_SEND_ID_FOR_UNSET_PASSWORD', ctx=Load())])]))])])"
+  ],
+  "handle_get_password_object": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='func', value=Call(func=Name(id='compose_filters', ctx=Load()), args=[Call(func=Name(id='private_only', ctx=Load())), Call(func=Name(id='conversation', ctx=Load()), args=[Name(id='CONVERSATION_STATE', ctx=Load()), Attribute(value=Name(id='State', ctx=Load()), attr='USER_SEND_ID_FOR_SET_PASSWORD', ctx=Load())])]))])])"
+  ],
+  "handle_set_password": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='func', value=Call(func=Name(id='compose_filters', ctx=Load()), args=[Call(func=Name(id='private_only', ctx=Load())), Call(func=Name(id='conversation', ctx=Load()), args=[Name(id='CONVERSATION_STATE', ctx=Load()), Attribute(value=Name(id='State', ctx=Load()), attr='USER_SEND_TEXT_FOR_SET_PASSWORD', ctx=Load())])]))])])"
+  ],
+  "handle_unset_caption": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='func', value=Call(func=Name(id='compose_filters', ctx=Load()), args=[Call(func=Name(id='private_only', ctx=Load())), Call(func=Name(id='conversation', ctx=Load()), args=[Name(id='CONVERSATION_STATE', ctx=Load()), Attribute(value=Name(id='State', ctx=Load()), attr='USER_SEND_ID_FOR_UNSET_CAPTION', ctx=Load())])]))])])"
+  ],
+  "handle_get_caption_object": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='func', value=Call(func=Name(id='compose_filters', ctx=Load()), args=[Call(func=Name(id='private_only', ctx=Load())), Call(func=Name(id='conversation', ctx=Load()), args=[Name(id='CONVERSATION_STATE', ctx=Load()), Attribute(value=Name(id='State', ctx=Load()), attr='USER_SEND_ID_FOR_SET_CAPTION', ctx=Load())])]))])])"
+  ],
+  "handle_set_caption": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='func', value=Call(func=Name(id='compose_filters', ctx=Load()), args=[Call(func=Name(id='private_only', ctx=Load())), Call(func=Name(id='conversation', ctx=Load()), args=[Name(id='CONVERSATION_STATE', ctx=Load()), Attribute(value=Name(id='State', ctx=Load()), attr='USER_SEND_TEXT_FOR_SET_CAPTION', ctx=Load())])]))])])"
+  ],
+  "handle_set_global_caption": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='func', value=Call(func=Name(id='compose_filters', ctx=Load()), args=[Call(func=Name(id='private_only', ctx=Load())), Call(func=Name(id='conversation', ctx=Load()), args=[Name(id='CONVERSATION_STATE', ctx=Load()), Attribute(value=Name(id='State', ctx=Load()), attr='USER_SET_GLOBAL_CAPTION', ctx=Load())]), Name(id='ADMIN_PREDICATE', ctx=Load())]))])])"
+  ],
+  "handle_delete_file": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='func', value=Call(func=Name(id='compose_filters', ctx=Load()), args=[Call(func=Name(id='private_only', ctx=Load())), Call(func=Name(id='conversation', ctx=Load()), args=[Name(id='CONVERSATION_STATE', ctx=Load()), Attribute(value=Name(id='State', ctx=Load()), attr='USER_DELETE_FILE', ctx=Load())])]))])])"
+  ],
+  "handle_upload_album": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='Album', ctx=Load()), keywords=[keyword(arg='func', value=Call(func=Name(id='compose_filters', ctx=Load()), args=[Call(func=Name(id='private_only', ctx=Load())), Call(func=Name(id='conversation', ctx=Load()), args=[Name(id='CONVERSATION_STATE', ctx=Load()), Attribute(value=Name(id='State', ctx=Load()), attr='USER_UPLOAD_FILE', ctx=Load())])]))])])"
+  ],
+  "handle_upload_file": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='func', value=Call(func=Name(id='compose_filters', ctx=Load()), args=[Call(func=Name(id='private_only', ctx=Load())), Call(func=Name(id='conversation', ctx=Load()), args=[Name(id='CONVERSATION_STATE', ctx=Load()), Attribute(value=Name(id='State', ctx=Load()), attr='USER_UPLOAD_FILE', ctx=Load())])]))])])"
+  ],
+  "handle_finish_upload": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='pattern', value=Constant(value='^✅ اتمام ارسال فایل$')), keyword(arg='func', value=Call(func=Name(id='compose_filters', ctx=Load()), args=[Call(func=Name(id='private_only', ctx=Load())), Call(func=Name(id='conversation', ctx=Load()), args=[Name(id='CONVERSATION_STATE', ctx=Load()), Attribute(value=Name(id='State', ctx=Load()), attr='USER_UPLOAD_FILE', ctx=Load())])]))])])"
+  ],
+  "handle_file_limits": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='func', value=Call(func=Name(id='compose_filters', ctx=Load()), args=[Call(func=Name(id='private_only', ctx=Load())), Call(func=Name(id='conversation', ctx=Load()), args=[Name(id='CONVERSATION_STATE', ctx=Load()), Attribute(value=Name(id='State', ctx=Load()), attr='USER_SET_FILE_LIMITS', ctx=Load())])]))])])"
+  ],
+  "handle_cancel_upload": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='pattern', value=Constant(value='^❌ لغو و بازگشت$')), keyword(arg='func', value=Call(func=Name(id='compose_filters', ctx=Load()), args=[Call(func=Name(id='private_only', ctx=Load())), Call(func=Name(id='conversation', ctx=Load()), args=[Name(id='CONVERSATION_STATE', ctx=Load()), Attribute(value=Name(id='State', ctx=Load()), attr='USER_UPLOAD_FILE', ctx=Load())])]))])])"
+  ],
+  "handle_idle": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='func', value=Call(func=Name(id='compose_filters', ctx=Load()), args=[Call(func=Name(id='private_only', ctx=Load())), Call(func=Name(id='conversation', ctx=Load()), args=[Name(id='CONVERSATION_STATE', ctx=Load()), Constant(value=None)])]))])])"
+  ],
+  "handle_admin_idle": [
+    "Call(func=Attribute(value=Name(id='CLIENT', ctx=Load()), attr='on', ctx=Load()), args=[Call(func=Attribute(value=Name(id='events', ctx=Load()), attr='NewMessage', ctx=Load()), keywords=[keyword(arg='func', value=Call(func=Name(id='compose_filters', ctx=Load()), args=[Call(func=Name(id='private_only', ctx=Load())), Call(func=Name(id='conversation', ctx=Load()), args=[Name(id='CONVERSATION_STATE', ctx=Load()), Attribute(value=Name(id='State', ctx=Load()), attr='USER_ADMIN_PANEL', ctx=Load())]), Name(id='ADMIN_PREDICATE', ctx=Load())]))])])"
+  ]
+}

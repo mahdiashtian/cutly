@@ -9,6 +9,7 @@ from typing import Awaitable, Callable, Dict, Optional, Union
 from telethon import events
 
 from services.user import read_user_from_db
+from core.maintenance import get_gate
 
 Predicate = Callable[[events.NewMessage.Event], Union[Awaitable[bool], bool]]
 
@@ -22,7 +23,7 @@ def conversation(conversation_state: Dict[int, Optional[Enum]], state: Optional[
 
     Returns:
         An awaitable predicate compatible with ``events.NewMessage``.
-        
+
     Examples:
         >>> state_dict = {}
         >>> predicate = conversation(state_dict, None)
@@ -42,7 +43,7 @@ def admin_filter(admin_master: int) -> Predicate:
 
     Returns:
         Awaitable predicate that resolves to ``True`` for admins.
-        
+
     Examples:
         >>> predicate = admin_filter(12345678)
     """
@@ -58,18 +59,18 @@ def admin_filter(admin_master: int) -> Predicate:
 
 def private_only() -> Predicate:
     """Return a predicate that only accepts private messages (PV).
-    
+
     Blocks messages from groups, channels, and supergroups.
     Bot should only respond to private 1-on-1 conversations.
-    
+
     Returns:
         Awaitable predicate that resolves to ``True`` only for private messages.
-        
+
     Examples:
         >>> predicate = private_only()
         >>> # Use in event handler: func=private_only()
     """
-    
+
     async def _predicate(event: events.NewMessage.Event) -> bool:
         return event.is_private
 
@@ -78,13 +79,13 @@ def private_only() -> Predicate:
 
 def compose_filters(*predicates: Predicate) -> Predicate:
     """Combine multiple predicates into one Telethon-compatible function.
-    
+
     Args:
         *predicates: Variable number of predicate functions.
-        
+
     Returns:
         Combined predicate function.
-        
+
     Examples:
         >>> pred1 = conversation({}, None)
         >>> pred2 = admin_filter(12345678)
@@ -92,12 +93,14 @@ def compose_filters(*predicates: Predicate) -> Predicate:
     """
 
     async def _predicate(event: events.NewMessage.Event) -> bool:
+        generation = get_gate().generation
         for predicate in predicates:
             result = predicate(event)
             if inspect.isawaitable(result):
                 result = await result
             if not result:
                 return False
-        return True
+        event._cutly_generation = generation
+        return generation == get_gate().generation
 
     return _predicate

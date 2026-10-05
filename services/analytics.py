@@ -1,118 +1,162 @@
-"""Analytics, access-log, and broadcast-report persistence helpers."""
-
-from __future__ import annotations
+"""SQLAlchemy analytics, access logs and broadcast reports."""
 
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
-
-from tortoise.functions import Count, Max, Sum
-
+from sqlalchemy import func, select, update, case
+from core.cache import get_cache
+from core.database import session_scope
 from core.models import BroadcastJob, File, FileAccessLog, User
 
 
 async def touch_user_activity(user_id: int) -> None:
-    """Record the last time a user interacted with the bot."""
-    await User.filter(userid=user_id).update(last_activity_at=datetime.now(timezone.utc))
+    timestamp = datetime.now(timezone.utc)
+    async with session_scope() as session:
+        persisted = await session.scalar(
+            update(User)
+            .where(User.userid == user_id)
+            .values(
+                last_activity_at=case(
+                    (
+                        (User.last_activity_at.is_(None))
+                        | (User.last_activity_at < timestamp),
+                        timestamp,
+                    ),
+                    else_=User.last_activity_at,
+                )
+            )
+            .returning(User.last_activity_at)
+        )
+    if persisted is not None:
+        await get_cache().update_user_activity(user_id, persisted.isoformat())
 
 
 async def record_file_access(viewer_id: int, file: File) -> None:
-    """Persist a successful link view for paginated admin reporting."""
-    await FileAccessLog.create(
-        viewer_id=viewer_id,
-        file_code=file.code,
-        owner_id=file.owner_id,
-    )
+    async with session_scope() as session:
+        session.add(
+            FileAccessLog(
+                viewer_id=viewer_id, file_code=file.code, owner_id=file.owner_id
+            )
+        )
 
 
-async def get_user_access_page(
-    user_id: int, page: int, page_size: int = 10
-) -> Tuple[List[Dict[str, Any]], int, Optional[User]]:
-    """Return a page of unique file links viewed by a user and their totals."""
-    safe_page = max(page, 0)
-    user = await User.filter(userid=user_id).first()
-    grouped = FileAccessLog.filter(viewer_id=user_id).group_by("file_code").annotate(
-        view_count=Count("id"),
-        last_viewed=Max("accessed_at"),
-    )
-    # Tortoise's ``count`` with ``GROUP BY`` is backend-dependent; retrieving
-    # only the distinct code field gives a correct page count on both DBs.
-    # ``distinct()`` must precede ``values()`` — ``ValuesQuery`` has no
-    # ``distinct()`` method of its own, only a ``distinct`` bool attribute.
-    total = len(await FileAccessLog.filter(viewer_id=user_id).distinct().values("file_code"))
-    rows = await grouped.order_by("-last_viewed").offset(safe_page * page_size).limit(page_size).values(
-        "file_code", "view_count", "last_viewed"
-    )
-    return rows, total, user
+async def get_user_access_page(user_id: int, page: int, page_size: int = 10):
+    async with session_scope() as session:
+        user = await session.scalar(select(User).where(User.userid == user_id))
+        total = (
+            await session.scalar(
+                select(func.count(func.distinct(FileAccessLog.file_code))).where(
+                    FileAccessLog.viewer_id == user_id
+                )
+            )
+            or 0
+        )
+        last_viewed = func.max(FileAccessLog.accessed_at).label("last_viewed")
+        stmt = (
+            select(
+                FileAccessLog.file_code,
+                func.count(FileAccessLog.id).label("view_count"),
+                last_viewed,
+            )
+            .where(FileAccessLog.viewer_id == user_id)
+            .group_by(FileAccessLog.file_code)
+            .order_by(last_viewed.desc())
+            .offset(max(page, 0) * page_size)
+            .limit(page_size)
+        )
+        rows = [dict(row) for row in (await session.execute(stmt)).mappings().all()]
+        return rows, total, user
 
 
-async def get_dashboard_statistics() -> Dict[str, Any]:
-    """Calculate the aggregate metrics shown in the admin dashboard."""
+async def get_dashboard_statistics() -> dict:
     now = datetime.now(timezone.utc)
-    today = now - timedelta(days=1)
-    recent_week = now - timedelta(days=7)
-    previous_week = now - timedelta(days=14)
+    today, recent_week, previous_week = (
+        now - timedelta(days=1),
+        now - timedelta(days=7),
+        now - timedelta(days=14),
+    )
+    async with session_scope() as session:
 
-    total_users = await User.all().count()
-    new_today = await User.filter(created_at__gte=today).count()
-    current_week_users = await User.filter(created_at__gte=recent_week).count()
-    previous_week_users = await User.filter(
-        created_at__gte=previous_week, created_at__lt=recent_week
-    ).count()
-    total_files = await File.all().count()
-    files_today = await File.filter(created_at__gte=today).count()
-    download_rows = await File.all().annotate(total=Sum("count")).values("total")
-    downloads = (download_rows[0]["total"] if download_rows else 0) or 0
-    views_today = await FileAccessLog.filter(accessed_at__gte=today).count()
-    broadcasts = await BroadcastJob.filter(status="completed").count()
-    delivered_rows = await BroadcastJob.filter(status="completed").annotate(
-        total=Sum("success_count")
-    ).values("total")
-    attempted_rows = await BroadcastJob.filter(status="completed").annotate(
-        total=Sum("total_count")
-    ).values("total")
-    delivered = (delivered_rows[0]["total"] if delivered_rows else 0) or 0
-    attempted = (attempted_rows[0]["total"] if attempted_rows else 0) or 0
+        def conditional_count(condition):
+            return func.count(case((condition, 1)))
 
+        total_users, new_today, current_users, previous_users = (
+            await session.execute(
+                select(
+                    func.count(User.id),
+                    conditional_count(User.created_at >= today),
+                    conditional_count(User.created_at >= recent_week),
+                    conditional_count(
+                        (User.created_at >= previous_week)
+                        & (User.created_at < recent_week)
+                    ),
+                )
+            )
+        ).one()
+        total_files, files_today, downloads = (
+            await session.execute(
+                select(
+                    func.count(File.id),
+                    conditional_count(File.created_at >= today),
+                    func.coalesce(func.sum(File.count), 0),
+                )
+            )
+        ).one()
+        views_today = await session.scalar(
+            select(func.count(FileAccessLog.id)).where(
+                FileAccessLog.accessed_at >= today
+            )
+        )
+        broadcasts, delivered, attempted = (
+            await session.execute(
+                select(
+                    func.count(BroadcastJob.id),
+                    func.coalesce(func.sum(BroadcastJob.success_count), 0),
+                    func.coalesce(func.sum(BroadcastJob.total_count), 0),
+                ).where(BroadcastJob.status == "completed")
+            )
+        ).one()
     return {
         "total_users": total_users,
         "new_today": new_today,
-        "week_growth": current_week_users - previous_week_users,
+        "week_growth": current_users - previous_users,
         "total_files": total_files,
         "files_today": files_today,
         "downloads": downloads,
         "views_today": views_today,
         "broadcasts": broadcasts,
-        "delivery_rate": (delivered / attempted * 100) if attempted else 0.0,
+        "delivery_rate": delivered / attempted * 100 if attempted else 0.0,
     }
 
 
 async def create_broadcast_job(
-    *,
-    admin_id: int,
-    delivery_type: str,
-    audience: str,
-    scheduled_at: Optional[datetime] = None,
+    *, admin_id, delivery_type, audience, scheduled_at=None
 ) -> BroadcastJob:
-    """Create a persisted audit record for a broadcast."""
-    return await BroadcastJob.create(
-        admin_id=admin_id,
-        delivery_type=delivery_type,
-        audience=audience,
-        scheduled_at=scheduled_at,
-        status="scheduled" if scheduled_at else "running",
-        started_at=None if scheduled_at else datetime.now(timezone.utc),
-    )
+    async with session_scope() as session:
+        job = BroadcastJob(
+            admin_id=admin_id,
+            delivery_type=delivery_type,
+            audience=audience,
+            scheduled_at=scheduled_at,
+            status="scheduled" if scheduled_at else "running",
+            started_at=None if scheduled_at else datetime.now(timezone.utc),
+        )
+        session.add(job)
+        await session.flush()
+        return job
 
 
 async def finish_broadcast_job(
-    job: BroadcastJob, *, total: int, success: int, failed: int, cancelled: bool = False
+    job: BroadcastJob, *, total, success, failed, cancelled=False
 ) -> None:
-    """Persist a broadcast outcome."""
-    job.status = "cancelled" if cancelled else "completed"
-    job.total_count = total
-    job.success_count = success
-    job.failed_count = failed
-    job.completed_at = datetime.now(timezone.utc)
-    await job.save(update_fields=[
-        "status", "total_count", "success_count", "failed_count", "completed_at"
-    ])
+    values = dict(
+        status="cancelled" if cancelled else "completed",
+        total_count=total,
+        success_count=success,
+        failed_count=failed,
+        completed_at=datetime.now(timezone.utc),
+    )
+    async with session_scope() as session:
+        await session.execute(
+            update(BroadcastJob).where(BroadcastJob.id == job.id).values(**values)
+        )
+    for key, value in values.items():
+        setattr(job, key, value)

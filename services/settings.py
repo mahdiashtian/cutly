@@ -1,34 +1,58 @@
-"""Bot-wide configuration singleton service."""
+"""Singleton bot settings persisted with SQLAlchemy."""
 
-from __future__ import annotations
-
-from typing import Optional
-
+from sqlalchemy.exc import IntegrityError
+from core.database import session_scope
 from core.models import BotSettings
-
-_SETTINGS_ID = 1
+from core.cache import get_cache
 
 
 async def get_bot_settings() -> BotSettings:
-    """Return the singleton settings row, creating it on first access."""
+    cache = get_cache()
+    data, version = await cache.get_snapshot("settings", "1")
+    if data is not None:
+        return BotSettings(**data)
+    async with session_scope() as session:
+        settings = await session.get(BotSettings, 1)
+        if settings is not None:
+            await cache.set_snapshot(
+                "settings",
+                "1",
+                {
+                    "id": 1,
+                    "global_caption": settings.global_caption,
+                    "show_file_captions": settings.show_file_captions,
+                },
+                version,
+            )
+            return settings
+    try:
+        async with session_scope() as session:
+            settings = BotSettings(id=1)
+            session.add(settings)
+            await session.flush()
+        return settings
+    except IntegrityError:
+        async with session_scope() as session:
+            settings = await session.get(BotSettings, 1)
+            if settings is None:
+                raise
+            return settings
 
-    settings, _ = await BotSettings.get_or_create(id=_SETTINGS_ID)
+
+async def _update(**values) -> BotSettings:
+    await get_bot_settings()
+    async with session_scope() as session:
+        settings = await session.get(BotSettings, 1)
+        for key, value in values.items():
+            setattr(settings, key, value)
+        await session.flush()
+    await get_cache().invalidate_scope("settings")
     return settings
 
 
-async def set_global_caption(caption: Optional[str]) -> BotSettings:
-    """Persist the caption shown at the start of every sent file's caption."""
-
-    settings = await get_bot_settings()
-    settings.global_caption = caption
-    await settings.save(update_fields=["global_caption"])
-    return settings
+async def set_global_caption(caption: str | None) -> BotSettings:
+    return await _update(global_caption=caption)
 
 
 async def set_show_file_captions(enabled: bool) -> BotSettings:
-    """Toggle whether each file's own caption is shown alongside the global one."""
-
-    settings = await get_bot_settings()
-    settings.show_file_captions = enabled
-    await settings.save(update_fields=["show_file_captions"])
-    return settings
+    return await _update(show_file_captions=enabled)

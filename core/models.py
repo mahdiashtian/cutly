@@ -1,187 +1,166 @@
-"""Tortoise ORM models representing core storage entities."""
+"""SQLAlchemy mappings compatible with existing Cutly database rows."""
 
 from __future__ import annotations
 
-from typing import Optional
-
-from tortoise import fields
-from tortoise.models import Model
-
-
-class User(Model):
-    """Represents a Telegram user interacting with the bot.
-    
-    Attributes:
-        id: Primary key.
-        userid: Telegram user ID (indexed and unique for fast lookups).
-        phone_number: Optional phone number.
-        created_at: Account creation timestamp.
-        is_superuser: Superuser flag.
-        is_staff: Staff member flag.
-        files: Reverse relation to user's uploaded files.
-    """
-
-    id: int = fields.IntField(pk=True)
-    userid: int = fields.BigIntField(index=True, unique=True)
-    phone_number: Optional[str] = fields.CharField(max_length=32, null=True)
-    created_at = fields.DatetimeField(auto_now_add=True, index=True)  # Added index for sorting
-    last_activity_at = fields.DatetimeField(null=True)
-    is_superuser: bool = fields.BooleanField(default=False, index=True)  # Index for admin queries
-    is_staff: bool = fields.BooleanField(default=False, index=True)  # Index for admin queries
-
-    files: fields.ReverseRelation["File"]
-
-    class Meta:
-        """Model metadata."""
-
-        table = "user"
-        indexes = [
-            # Composite index for admin queries
-            ("is_superuser", "is_staff"),
-        ]
+from datetime import datetime, timezone
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    LargeBinary,
+    String,
+    Text,
+    false,
+    true,
+)
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.types import TypeDecorator
 
 
-class Channel(Model):
-    """Represents a channel that users must join before using the bot.
-    
-    Attributes:
-        id: Primary key.
-        channel_id: Telegram channel ID or username (indexed for fast lookups).
-        channel_link: Channel invitation link.
-        created_at: Channel addition timestamp.
-        is_active: Whether the channel is active for forced join.
-    """
-
-    id: int = fields.IntField(pk=True)
-    channel_id: str = fields.CharField(max_length=255, unique=True, index=True)
-    channel_link: str = fields.CharField(max_length=255, index=True)
-    created_at = fields.DatetimeField(auto_now_add=True)
-    is_active: bool = fields.BooleanField(default=True, index=True)
-
-    class Meta:
-        """Model metadata."""
-
-        table = "channel"
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
-class File(Model):
-    """Represents a stored Telegram media resource.
-    
-    Supports both single files and album (grouped media).
-    Uses Telegram's file_id and access_hash for efficient file sending without re-download.
-    
-    Attributes:
-        id: Primary key.
-        type: File type (photo, video, document, etc.).
-        size: File size in bytes.
-        code: Unique file code for sharing (indexed for fast lookups).
-        file_id: Telegram file ID for direct access.
-        access_hash: Telegram access hash for file retrieval.
-        file_reference: Telegram file reference (bytes) for up-to-date access.
-        message_id: Message ID in storage channel (for backup/viewing only).
-        count: Download count.
-        password: Optional password protection.
-        caption: Optional custom caption.
-        album_id: Optional album ID for grouped media (same for all files in album).
-        album_order: Order of this file within its album (0-based).
-        created_at: Upload timestamp (indexed for sorting).
-        owner: Foreign key to User model.
-    """
+class UTCDateTime(TypeDecorator):
+    """Keep UTC-aware timestamps on both SQLite and PostgreSQL."""
 
-    id: int = fields.IntField(pk=True)
-    type: str = fields.CharField(max_length=64, index=True)  # Index for filtering by type
-    size: int = fields.BigIntField()
-    code: str = fields.CharField(max_length=32, unique=True, index=True)
-    file_id: int = fields.BigIntField()  # Telegram file ID
-    access_hash: int = fields.BigIntField()  # Telegram access hash
-    file_reference: bytes = fields.BinaryField()  # Telegram file reference
-    message_id: int = fields.BigIntField()  # Message ID in storage channel (backup only)
-    count: int = fields.IntField(default=0, index=True)  # Index for popular files queries
-    password: Optional[str] = fields.CharField(max_length=255, null=True)
-    caption: Optional[str] = fields.TextField(null=True)
-    album_id: Optional[str] = fields.CharField(max_length=64, null=True, index=True)  # Group media
-    album_order: int = fields.IntField(default=0)  # Order within album
-    created_at = fields.DatetimeField(auto_now_add=True, index=True)  # Index for sorting
-    expires_at = fields.DatetimeField(null=True)
-    max_downloads: Optional[int] = fields.IntField(null=True)
+    impl = DateTime(timezone=True)
+    cache_ok = True
 
-    owner: fields.ForeignKeyRelation[User] = fields.ForeignKeyField(
-        "models.User",  # Tortoise ORM app.Model format (app name is "models")
-        related_name="files",
-        to_field="userid",
-        db_column="owner_id",
-        on_delete=fields.CASCADE,  # Cascade delete when user is deleted
+    @property
+    def python_type(self):
+        return datetime
+
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+    def process_result_value(self, value, dialect):
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class User(Base):
+    __tablename__ = "user"
+    __table_args__ = (
+        Index("ix_user_is_superuser_is_staff", "is_superuser", "is_staff"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    userid: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
+    phone_number: Mapped[str | None] = mapped_column(String(32))
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), default=utcnow, index=True
+    )
+    last_activity_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    is_superuser: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false(), index=True
+    )
+    is_staff: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false(), index=True
+    )
+    files: Mapped[list[File]] = relationship(
+        back_populates="owner", passive_deletes=True, lazy="raise"
     )
 
-    class Meta:
-        """Model metadata."""
 
-        table = "file"
-        indexes = [
-            # Composite indexes for common queries
-            ("owner_id", "created_at"),  # User's files sorted by date
-            ("type", "created_at"),  # Files by type and date
-            ("album_id", "album_order"),  # Album files in order
-        ]
-
-
-class FileAccessLog(Model):
-    """A successful view of a shared file link by a Telegram user."""
-
-    id: int = fields.IntField(pk=True)
-    viewer_id: int = fields.BigIntField(index=True)
-    file_code: str = fields.CharField(max_length=32, index=True)
-    owner_id: int = fields.BigIntField(index=True)
-    accessed_at = fields.DatetimeField(auto_now_add=True, index=True)
-
-    class Meta:
-        table = "file_access_log"
-        indexes = [
-            ("viewer_id", "accessed_at"),
-            ("viewer_id", "file_code"),
-            ("file_code", "accessed_at"),
-        ]
+class Channel(Base):
+    __tablename__ = "channel"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    channel_id: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    channel_link: Mapped[str] = mapped_column(String(255), index=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=true(), index=True
+    )
 
 
-class BotSettings(Model):
-    """Singleton row storing bot-wide configuration toggles.
+class File(Base):
+    __tablename__ = "file"
+    __table_args__ = (
+        Index("ix_file_owner_id_created_at", "owner_id", "created_at"),
+        Index("ix_file_type_created_at", "type", "created_at"),
+        Index("ix_file_album_id_album_order", "album_id", "album_order"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    type: Mapped[str] = mapped_column(String(64), index=True)
+    size: Mapped[int] = mapped_column(BigInteger)
+    code: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    file_id: Mapped[int] = mapped_column(BigInteger)
+    access_hash: Mapped[int] = mapped_column(BigInteger)
+    file_reference: Mapped[bytes] = mapped_column(LargeBinary)
+    message_id: Mapped[int] = mapped_column(BigInteger)
+    count: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", index=True
+    )
+    password: Mapped[str | None] = mapped_column(String(255))
+    caption: Mapped[str | None] = mapped_column(Text)
+    album_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    album_order: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), default=utcnow, index=True
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    max_downloads: Mapped[int | None] = mapped_column(Integer)
+    owner_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("user.userid", ondelete="CASCADE")
+    )
+    owner: Mapped[User] = relationship(back_populates="files", lazy="raise")
 
-    Attributes:
-        id: Primary key (a single row with id=1 is used).
-        global_caption: Caption prepended to every outgoing file, regardless
-            of whether the file also has its own caption.
-        show_file_captions: When False, only ``global_caption`` is shown and
-            each file's own caption is hidden.
-    """
 
-    id: int = fields.IntField(pk=True)
-    global_caption: Optional[str] = fields.TextField(null=True)
-    show_file_captions: bool = fields.BooleanField(default=True)
+class FileAccessLog(Base):
+    __tablename__ = "file_access_log"
+    __table_args__ = (
+        Index("ix_file_access_log_viewer_id_accessed_at", "viewer_id", "accessed_at"),
+        Index("ix_file_access_log_viewer_id_file_code", "viewer_id", "file_code"),
+        Index("ix_file_access_log_file_code_accessed_at", "file_code", "accessed_at"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    viewer_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    file_code: Mapped[str] = mapped_column(String(32), index=True)
+    owner_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    accessed_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), default=utcnow, index=True
+    )
 
-    class Meta:
-        """Model metadata."""
 
-        table = "bot_settings"
+class BotSettings(Base):
+    __tablename__ = "bot_settings"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    global_caption: Mapped[str | None] = mapped_column(Text)
+    show_file_captions: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=true()
+    )
 
 
-class BroadcastJob(Model):
-    """Stores outcomes of completed and scheduled admin broadcasts."""
-
-    id: int = fields.IntField(pk=True)
-    admin_id: int = fields.BigIntField(index=True)
-    delivery_type: str = fields.CharField(max_length=16)
-    audience: str = fields.CharField(max_length=128)
-    status: str = fields.CharField(max_length=16, default="scheduled", index=True)
-    total_count: int = fields.IntField(default=0)
-    success_count: int = fields.IntField(default=0)
-    failed_count: int = fields.IntField(default=0)
-    scheduled_at = fields.DatetimeField(null=True, index=True)
-    started_at = fields.DatetimeField(null=True)
-    completed_at = fields.DatetimeField(null=True)
-
-    class Meta:
-        table = "broadcast_job"
-        indexes = [
-            ("status", "scheduled_at"),
-            ("admin_id", "started_at"),
-        ]
+class BroadcastJob(Base):
+    __tablename__ = "broadcast_job"
+    __table_args__ = (
+        Index("ix_broadcast_job_status_scheduled_at", "status", "scheduled_at"),
+        Index("ix_broadcast_job_admin_id_started_at", "admin_id", "started_at"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    admin_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    delivery_type: Mapped[str] = mapped_column(String(16))
+    audience: Mapped[str] = mapped_column(String(128))
+    status: Mapped[str] = mapped_column(
+        String(16), default="scheduled", server_default="scheduled", index=True
+    )
+    total_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    success_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    failed_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    scheduled_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), index=True)
+    started_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime())

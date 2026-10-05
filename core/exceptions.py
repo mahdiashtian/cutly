@@ -8,7 +8,7 @@ class CutlyException(Exception):
 
     def __init__(self, message: str, code: str = "UNKNOWN_ERROR") -> None:
         """Initialize exception with message and error code.
-        
+
         Args:
             message: Human-readable error message.
             code: Machine-readable error code.
@@ -23,7 +23,7 @@ class DatabaseError(CutlyException):
 
     def __init__(self, message: str) -> None:
         """Initialize database error.
-        
+
         Args:
             message: Error description.
         """
@@ -35,7 +35,7 @@ class UserNotFoundError(CutlyException):
 
     def __init__(self, user_id: int) -> None:
         """Initialize user not found error.
-        
+
         Args:
             user_id: The user ID that was not found.
         """
@@ -48,7 +48,7 @@ class FileNotFoundError(CutlyException):
 
     def __init__(self, code: str) -> None:
         """Initialize file not found error.
-        
+
         Args:
             code: The file code that was not found.
         """
@@ -61,7 +61,7 @@ class ChannelNotFoundError(CutlyException):
 
     def __init__(self, channel_id: str) -> None:
         """Initialize channel not found error.
-        
+
         Args:
             channel_id: The channel ID that was not found.
         """
@@ -82,7 +82,7 @@ class PermissionDeniedError(CutlyException):
 
     def __init__(self, action: str) -> None:
         """Initialize permission denied error.
-        
+
         Args:
             action: The action that was denied.
         """
@@ -95,7 +95,7 @@ class BroadcastError(CutlyException):
 
     def __init__(self, message: str, failed_count: int = 0) -> None:
         """Initialize broadcast error.
-        
+
         Args:
             message: Error description.
             failed_count: Number of failed broadcasts.

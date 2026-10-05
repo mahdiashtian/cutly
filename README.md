@@ -1,191 +1,68 @@
-# Cutly - Telegram File Storage Bot
+# Cutly — Telegram File Storage Bot
 
-A modern, scalable Telegram bot for file storage and sharing built with Telethon and Tortoise ORM.
+An async Telegram bot for storing and sharing files, built with **Telethon 1.45.0**, **SQLAlchemy 2.0.54**, **Alembic 1.20.0**, and **Redis**.
 
-## 🏗️ Project Structure
+The migration preserves existing Persian menus, user/admin workflows, file links and database rows. [Feature contracts](docs/features.md) record behavior and regression tests. [Migration instructions](docs/migration.md) cover existing deployments and rollback.
 
-```
-cutly/
-├── app/                    # Application layer
-│   ├── __init__.py
-│   ├── bot.py             # Bot lifecycle management
-│   ├── config.py          # Configuration management
-│   └── handlers/          # Event handlers (future)
-│       └── __init__.py
-├── core/                  # Core functionality
-│   ├── __init__.py
-│   ├── database.py        # Database configuration
-│   ├── models.py          # ORM models
-│   └── state.py           # State machine
-├── services/              # Business logic layer
-│   ├── __init__.py
-│   ├── backup.py          # Backup services
-│   ├── channel.py         # Channel management
-│   ├── file.py            # File management
-│   └── user.py            # User management
-├── utils/                 # Utility modules
-│   ├── __init__.py
-│   ├── filters.py         # Telethon filters
-│   ├── helpers.py         # Helper functions
-│   ├── keyboard.py        # Keyboard layouts
-│   └── text.py            # Text constants
-├── main.py                # Application entry point
-├── requirements.txt       # Python dependencies
-└── README.md             # This file
-```
+## Features
 
-## ✨ Features
+- Single files and multi-file upload sessions with one share link.
+- Direct Telegram media identifiers, ordered albums and upload history.
+- Passwords, custom/global captions and caption visibility controls.
+- Link expiry, download caps, counters and temporary message cleanup.
+- Admin permissions and mandatory channel membership.
+- Copy/forward broadcasts, audience selection, previews, Tehran-time scheduling, cancellation and CSV reports.
+- Dashboard statistics and paginated unique-link access logs.
+- Persistent Redis caching with database fallback.
+- Full PostgreSQL database dumps, portable data-only backups, and confirmed atomic restores.
 
-- 📤 **File Upload & Storage**: Upload files up to 2GB
-- 🔗 **Share Links**: Generate unique sharing links
-- 🔐 **Password Protection**: Protect files with passwords
-- 📝 **Custom Captions**: Add custom captions to files
-- 📊 **Download Tracking**: Track file download counts
-- 👥 **Admin Panel**: Comprehensive admin management
-- 📢 **Broadcast Messages**: Send messages to all users
-- 🎯 **Forced Join**: Require channel membership
-- 🔄 **Auto Cleanup**: Automatic message cleanup after 30s
-- ⚡ **Redis Cache**: High-performance caching for 1000+ concurrent users
+## Setup
 
-## 🚀 Installation
+Use Python 3.10 or newer. SQLite works by default; PostgreSQL and Redis are supported. Redis can be disabled for development, and failed cache connections fall back to database reads.
 
-### Prerequisites
-
-- Python 3.8+
-- PostgreSQL (optional, SQLite by default)
-- Redis (recommended for production, optional)
-
-### Setup
-
-1. Clone the repository:
-```bash
-git clone https://github.com/yourusername/cutly.git
-cd cutly
-```
-
-2. Create virtual environment:
 ```bash
 python -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+# Windows: .venv\Scripts\activate
+# Linux/macOS: source .venv/bin/activate
+python -m pip install -r requirements.txt
 ```
 
-3. Install dependencies:
-```bash
-pip install -r requirements.txt
-```
-
-4. Install and start Redis (optional but recommended):
-```bash
-# Linux/Mac
-sudo apt install redis-server  # Debian/Ubuntu
-brew install redis             # macOS
-sudo systemctl start redis
-
-# Or use Docker
-docker run -d --name redis-cutly -p 6379:6379 redis:7-alpine
-```
-
-5. Configure environment variables:
-```bash
-# Create .env file with your configuration
-# See .env.example or REDIS_SETUP.md for details
-```
-
-### Environment Variables
-
-```env
-# Required
-API_ID=your_api_id
-API_HASH=your_api_hash
-BOT_TOKEN=your_bot_token
-
-# Optional
-ADMIN_MASTER=your_telegram_id
-SESSION_STRING=your_session_string
-SESSION_NAME=cutly
-WORKERS=20
-
-# Database (optional, defaults to SQLite)
-DB_NAME=cutly
-DB_USER=postgres
-DB_PASSWORD=your_password
-DB_HOST=localhost
-DB_PORT=5432
-
-# Redis Cache (recommended for production, handles 1000+ concurrent users)
-REDIS_ENABLED=true
-REDIS_HOST=localhost
-REDIS_PORT=6379
-REDIS_DB=0
-REDIS_PASSWORD=  # Optional
-```
-
-> 💡 **Performance Tip**: Enable Redis cache for 10-100x faster response times and ability to handle 1000+ concurrent users.
-
-## 📚 Architecture
-
-### Design Patterns
-
-- **Repository Pattern**: Services layer abstracts database operations
-- **State Machine**: Conversation states for user interactions
-- **Dependency Injection**: Configuration and dependencies injected
-- **Separation of Concerns**: Clear separation between layers
-
-### Layers
-
-1. **App Layer** (`app/`): Bot initialization and configuration
-2. **Core Layer** (`core/`): Database models and state management
-3. **Service Layer** (`services/`): Business logic and data operations
-4. **Utils Layer** (`utils/`): Reusable utilities and helpers
-
-### Async Best Practices
-
-- ✅ All I/O operations are async
-- ✅ No blocking calls in async functions
-- ✅ Proper error handling with try/except
-- ✅ Rate limiting for broadcasts
-- ✅ Concurrent operations with `asyncio.gather`
-- ✅ Semaphores for resource management
-
-## 🔧 Usage
-
-### Running the Bot
+Copy [.env.example](.env.example) to .env and configure API_ID, API_HASH, BOT_TOKEN, ADMIN_MASTER and STORAGE_CHANNEL_ID. Keep existing sessions and credentials when upgrading. uvloop is installed on supported Unix platforms; Windows uses asyncio.
 
 ```bash
+python -m alembic upgrade head
 python main.py
 ```
 
-### Development
+Startup also upgrades the schema through Alembic. Existing SQLite and PostgreSQL DB_URL values are accepted along with SQLAlchemy async DSNs. Existing DB_NAME/DB_USER/DB_PASSWORD/DB_HOST/DB_PORT settings remain supported when DB_URL is empty.
 
-For development with auto-reload:
-```bash
-# Install development dependencies
-pip install -r requirements-dev.txt
+## Structure
 
-# Run with auto-reload
-watchdog main.py
+```text
+app/          configuration, client factory and dependency container
+core/         SQLAlchemy models, sessions, Redis, conversation and upload state
+services/     repositories and business operations
+utils/        Telethon filters, delivery, keyboards and Persian messages
+migrations/   frozen Alembic revisions and async migration environment
+tests/        regression tests, legacy contracts and optional integration checks
+docs/         feature inventory and migration guide
+main.py       event handlers and application lifecycle
 ```
 
-## 📝 License
+Each database operation receives its own async session. Conversation updates write only changed fields, and counters use atomic SQL updates. Redis keeps the existing cache keys and invalidation behavior.
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+File and album metadata and settings use versioned Redis snapshots. Download counts remain authoritative in SQL; concurrent requests reserve download slots atomically. Expired Telegram file references are refreshed from the storage channel. See [backup and recovery](docs/backup-restore.md) for supported formats, version compatibility, and operational limits.
 
-## 🤝 Contributing
+## Development
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+```bash
+python -m pip install -r requirements-dev.txt
+python -m pytest -q
+python -m ruff check .
+```
 
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
+Integration tests require disposable PostgreSQL/Redis URLs; see the [verification guide](docs/migration.md#verification). Unit tests never connect to Telegram. Scheduled broadcasts and unfinished conversations remain in memory as in the original application.
 
-## 📧 Support
+## License
 
-For support, please open an issue or contact the maintainer.
-
-## 🙏 Acknowledgments
-
-- [Telethon](https://github.com/LonamiWebs/Telethon) - Telegram client library
-- [Tortoise ORM](https://github.com/tortoise/tortoise-orm) - Async ORM
-- [APScheduler](https://github.com/agronholm/apscheduler) - Task scheduling
+[MIT](LICENSE).

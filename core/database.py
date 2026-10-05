@@ -1,84 +1,111 @@
-"""Tortoise ORM database configuration and lifecycle helpers."""
+"""Async SQLAlchemy lifecycle and Alembic schema upgrades."""
 
 from __future__ import annotations
 
-from typing import Final
-
-from tortoise import Tortoise
-
-from app.config import (
-    DB_HOST,
-    DB_NAME,
-    DB_PASSWORD,
-    DB_PORT,
-    DB_URL_OVERRIDE,
-    DB_USER,
+from contextlib import asynccontextmanager
+from pathlib import Path
+from alembic import command
+from alembic.config import Config
+from decouple import config
+from sqlalchemy import URL, event, make_url
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
 )
+from core.maintenance import get_gate
 
-DEFAULT_SQLITE_URL: Final[str] = "sqlite://db.sqlite3"
 
-if DB_URL_OVERRIDE:
-    TORTOISE_DB_URL: str = DB_URL_OVERRIDE
-elif DB_NAME and DB_USER:
-    TORTOISE_DB_URL = f"postgres://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-else:
-    TORTOISE_DB_URL = DEFAULT_SQLITE_URL
+def database_url() -> URL:
+    """Accept legacy Tortoise DSNs and SQLAlchemy async DSNs."""
+    override = config("DB_URL", default="")
+    if override:
+        if override.startswith("sqlite://") and not override.startswith("sqlite:///"):
+            override = "sqlite+aiosqlite:///" + override[len("sqlite://") :]
+        url = make_url(override)
+        if url.get_backend_name() in ("postgres", "postgresql"):
+            return url.set(drivername="postgresql+asyncpg")
+        if url.get_backend_name() == "sqlite":
+            return url.set(drivername="sqlite+aiosqlite")
+        raise ValueError("DB_URL must point to SQLite or PostgreSQL")
+    name = config("DB_NAME", default="")
+    user = config("DB_USER", default="")
+    if name and user:
+        return URL.create(
+            "postgresql+asyncpg",
+            username=user,
+            password=config("DB_PASSWORD", default=""),
+            host=config("DB_HOST", default="localhost"),
+            port=config("DB_PORT", default=5432, cast=int),
+            database=name,
+        )
+    return make_url("sqlite+aiosqlite:///db.sqlite3")
+
+
+def create_engine(url: str | URL) -> AsyncEngine:
+    engine = create_async_engine(url, pool_pre_ping=True)
+    if engine.dialect.name == "sqlite":
+
+        @event.listens_for(engine.sync_engine, "connect")
+        def configure_sqlite(connection, record):
+            cursor = connection.cursor()
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.execute("PRAGMA busy_timeout=30000")
+            cursor.close()
+
+    return engine
+
+
+_engine: AsyncEngine | None = None
+_sessions: async_sessionmaker[AsyncSession] | None = None
+
+
+def get_engine() -> AsyncEngine:
+    global _engine, _sessions
+    if _engine is None:
+        _engine = create_engine(database_url())
+        _sessions = async_sessionmaker(_engine, expire_on_commit=False)
+    return _engine
+
+
+@asynccontextmanager
+async def session_scope():
+    """One session per operation; commit writes or roll them back."""
+    get_engine()
+    assert _sessions is not None
+    async with get_gate().operation():
+        async with _sessions() as session:
+            async with session.begin():
+                yield session
+
+
+def alembic_config() -> Config:
+    root = Path(__file__).resolve().parent.parent
+    cfg = Config(str(root / "alembic.ini"))
+    cfg.set_main_option("script_location", str(root / "migrations"))
+    return cfg
 
 
 async def init_db() -> None:
-    """Initialize and migrate the Tortoise ORM schema.
+    """Upgrade on the app's async connection, including in-memory SQLite."""
 
-    Examples:
-        >>> await init_db()
+    def upgrade(connection):
+        cfg = alembic_config()
+        cfg.attributes["connection"] = connection
+        command.upgrade(cfg, "head")
 
-    Raises:
-        ConfigurationError: Raised when the provided DSN cannot be parsed.
-    """
-
-    await Tortoise.init(db_url=TORTOISE_DB_URL, modules={"models": ["core.models"]})
-    await Tortoise.generate_schemas()
-    await _migrate_existing_schema()
-
-
-async def _migrate_existing_schema() -> None:
-    """Add columns introduced after the initial schema to existing deployments.
-
-    ``generate_schemas`` creates missing tables but deliberately does not alter
-    existing ones.  These additive migrations keep both SQLite and PostgreSQL
-    installations compatible without requiring a manual database reset.
-    """
-    connection = Tortoise.get_connection("default")
-    dialect = connection.capabilities.dialect
-    timestamp_type = "TIMESTAMPTZ" if dialect == "postgres" else "TIMESTAMP"
-
-    if dialect == "sqlite":
-        _, user_columns = await connection.execute_query('PRAGMA table_info("user")')
-        _, file_columns = await connection.execute_query('PRAGMA table_info("file")')
-        known_user_columns = {column["name"] for column in user_columns}
-        known_file_columns = {column["name"] for column in file_columns}
-        if "last_activity_at" not in known_user_columns:
-            await connection.execute_query(
-                f'ALTER TABLE "user" ADD COLUMN "last_activity_at" {timestamp_type}'
-            )
-        if "expires_at" not in known_file_columns:
-            await connection.execute_query(
-                f'ALTER TABLE "file" ADD COLUMN "expires_at" {timestamp_type}'
-            )
-        if "max_downloads" not in known_file_columns:
-            await connection.execute_query('ALTER TABLE "file" ADD COLUMN "max_downloads" INT')
-    else:
-        await connection.execute_query(
-            f'ALTER TABLE "user" ADD COLUMN IF NOT EXISTS "last_activity_at" {timestamp_type}'
-        )
-        await connection.execute_query(
-            f'ALTER TABLE "file" ADD COLUMN IF NOT EXISTS "expires_at" {timestamp_type}'
-        )
-        await connection.execute_query(
-            'ALTER TABLE "file" ADD COLUMN IF NOT EXISTS "max_downloads" INT'
-        )
+    try:
+        async with get_engine().begin() as connection:
+            await connection.run_sync(upgrade)
+    except BaseException:
+        await close_db()
+        raise
 
 
 async def close_db() -> None:
-    """Close all database connections gracefully."""
-
-    await Tortoise.close_connections()
+    global _engine, _sessions
+    if _engine is not None:
+        await _engine.dispose()
+    _engine = None
+    _sessions = None

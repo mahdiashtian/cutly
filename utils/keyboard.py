@@ -25,6 +25,12 @@ ADMIN_KEYBOARD: KeyboardLayout = [
     [Button.text("❌ حذف ادمین", resize=True), Button.text("👥 نمایش لیست ادمین ها", resize=True), Button.text("👤 افزودن ادمین", resize=True)],
     [Button.text("📈آمار", resize=True), Button.text("🔌بک آپ", resize=True)],
     [Button.text("📜 لاگ کاربر", resize=True)],
+    [Button.text("📦 بک‌آپ داده‌ها", resize=True), Button.text("♻️ بازیابی بک‌آپ", resize=True)],
+]
+
+RESTORE_CONFIRM_KEYBOARD: KeyboardLayout = [
+    [Button.text("✅ تأیید بازیابی", resize=True)],
+    [Button.text("🔙 بازگشت", resize=True)],
 ]
 
 GLOBAL_CAPTION_KEYBOARD: KeyboardLayout = [

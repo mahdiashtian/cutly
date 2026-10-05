@@ -23,7 +23,12 @@ from telethon.tl.types import (
 from telethon.utils import resolve_bot_file_id
 
 from core.models import BotSettings, File, User
+from core.maintenance import get_gate
 from services.settings import get_bot_settings
+from services.file import (
+    read_album_files, save_file_fields, reserve_file_downloads,
+    finish_file_downloads, DownloadLimitError,
+)
 from utils.keyboard import KeyboardLayout
 from telethon.errors import (
     ChatWriteForbiddenError,
@@ -36,10 +41,46 @@ from telethon.errors import (
     UserDeactivatedBanError,
     UserDeactivatedError,
     UserIsBlockedError,
+    FileReferenceExpiredError,
+    FileReferenceInvalidError,
+    FileReferenceEmptyError,
 )
 from telethon.errors.common import InvalidBufferError
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _input_file(file):
+    cls = InputPhoto if file.type == "photo" else InputDocument
+    return cls(id=file.file_id, access_hash=file.access_hash, file_reference=file.file_reference)
+
+
+async def _send_stored_media(client, chat_id, files, storage_channel_id, **kwargs):
+    grouped = isinstance(files, list)
+    records = files if grouped else [files]
+
+    async def send():
+        media = [_input_file(record) for record in records]
+        return await client.send_file(chat_id, file=media if grouped else media[0], **kwargs)
+
+    try:
+        return await send()
+    except (FileReferenceExpiredError, FileReferenceInvalidError, FileReferenceEmptyError):
+        if not storage_channel_id:
+            raise
+        messages = await client.get_messages(storage_channel_id, ids=[record.message_id for record in records])
+        if not isinstance(messages, (list, tuple)):
+            messages = [messages]
+        by_id = {message.id: message for message in messages if message}
+        for record in records:
+            message = by_id.get(record.message_id)
+            media = getattr(message, "photo" if record.type == "photo" else "document", None)
+            if media is None or media.id != record.file_id:
+                raise ValueError("Stored Telegram source is missing or changed")
+            record.access_hash = media.access_hash
+            record.file_reference = media.file_reference
+            await save_file_fields(record, "access_hash", "file_reference")
+        return await send()
 
 
 def build_file_caption(file_caption: Optional[str], settings: BotSettings) -> str:
@@ -65,7 +106,7 @@ def generate_random_text(length: int = 15, existing_text: str = "") -> str:
 
     Raises:
         ValueError: If ``length`` is less than ``1``.
-        
+
     Examples:
         >>> code = generate_random_text(15)
         >>> len(code)
@@ -82,6 +123,39 @@ def generate_random_text(length: int = 15, existing_text: str = "") -> str:
 
 
 async def send_file(
+    client: TelegramClient, chat_id: int, file: File, *, bot_username: str,
+    keyboard: KeyboardLayout, storage_channel_id: int,
+) -> List[Message]:
+    async with get_gate().operation():
+        return await _send_reserved_file(client, chat_id, file,
+            bot_username=bot_username, keyboard=keyboard, storage_channel_id=storage_channel_id)
+
+
+async def _send_reserved_file(
+    client: TelegramClient, chat_id: int, file: File, *, bot_username: str,
+    keyboard: KeyboardLayout, storage_channel_id: int,
+) -> List[Message]:
+    records = await read_album_files(file.album_id) if file.album_id else [file]
+    try:
+        counts = await reserve_file_downloads(records)
+    except DownloadLimitError:
+        await client.send_message(chat_id, "🚫 لینک منقضی شده یا سقف دانلود آن پر شده است.", buttons=keyboard)
+        return []
+    for record in records:
+        record.count = counts[record.code] - 1
+    file.count = counts[file.code] - 1
+    try:
+        result = await _send_file(client, chat_id, file, bot_username=bot_username,
+            keyboard=keyboard, storage_channel_id=storage_channel_id, album_files=records)
+    except BaseException:
+        await finish_file_downloads(records, success=False)
+        raise
+    await finish_file_downloads(records, success=True)
+    file.count = next(record.count for record in records if record.code == file.code)
+    return result
+
+
+async def _send_file(
     client: TelegramClient,
     chat_id: int,
     file: File,
@@ -89,6 +163,7 @@ async def send_file(
     bot_username: str,
     keyboard: KeyboardLayout,
     storage_channel_id: int,
+    album_files: List[File],
 ) -> List[Message]:
     """Send a stored media file or album back to the user using Telegram file IDs.
 
@@ -117,7 +192,7 @@ async def send_file(
         ...     storage_channel_id=-1001234567890
         ... )
     """
-    
+
     footer = (
         f"\n👁 تعداد دانلود : {file.count + 1}\n"
         f"❌ این پیام بعد از ۳۰ ثانیه حذف می شود\n\n@{bot_username}"
@@ -127,8 +202,7 @@ async def send_file(
     # Check if this file is part of an album
     if file.album_id:
         # Retrieve all files in the album, ordered by album_order
-        album_files = await File.filter(album_id=file.album_id).order_by("album_order")
-        
+
         # Separate media into groupable (photos/videos) and fallback (audio, document, ...)
         grouped_pairs = []
         fallback_pairs = []
@@ -154,32 +228,28 @@ async def send_file(
                     file_reference=album_file.file_reference
                 )
                 fallback_pairs.append((album_file, input_media))
-        
+
         caption = build_file_caption(file.caption, settings) + footer
-        caption_used = False
         sent_messages: List[Message] = []
-        
-        # Send grouped photos/videos together if present
+
+        # Send grouped photos/videos together, repeating the caption under
+        # every item in the group (a single string caption would only be
+        # attached to one item in the album).
         if grouped_pairs:
             media_list = [media for _, media in grouped_pairs]
             try:
-                grouped_result = await client.send_file(
-                    chat_id,
-                    file=media_list,
-                    caption=caption,
+                grouped_result = await _send_stored_media(
+                    client, chat_id, [record for record, _ in grouped_pairs], storage_channel_id,
+                    caption=[caption] * len(media_list),
                 )
-                caption_used = True
             except Exception:
                 grouped_result = []
-                for idx, (album_file, input_media) in enumerate(grouped_pairs):
-                    msg_caption = caption if not caption_used else None
+                for album_file, input_media in grouped_pairs:
                     try:
-                        msg = await client.send_file(
-                            chat_id,
-                            file=input_media,
-                            caption=msg_caption,
+                        msg = await _send_stored_media(
+                            client, chat_id, album_file, storage_channel_id,
+                            caption=caption,
                         )
-                        caption_used = caption_used or msg_caption is not None
                         grouped_result.append(msg)
                     except Exception:
                         continue
@@ -188,56 +258,30 @@ async def send_file(
                     sent_messages.extend(grouped_result)
                 else:
                     sent_messages.append(grouped_result)
-        
-        # Send fallback media (audio/voice/documents) individually
-        for idx, (album_file, input_media) in enumerate(fallback_pairs):
-            msg_caption = caption if not caption_used else None
-            msg = await client.send_file(
-                chat_id,
-                file=input_media,
-                caption=msg_caption,
+
+        # Send fallback media (audio/voice/documents) individually, each
+        # carrying its own copy of the caption.
+        for album_file, input_media in fallback_pairs:
+            msg = await _send_stored_media(
+                client, chat_id, album_file, storage_channel_id,
+                caption=caption,
             )
-            caption_used = caption_used or msg_caption is not None
             sent_messages.append(msg)
-        
-        if not grouped_pairs and not fallback_pairs:
-            raise ValueError("No valid media files in album")
-        
-        # Increment count for each file in album
-        for album_file in album_files:
-            album_file.count += 1
-            await album_file.save()
-        
+
+        if not sent_messages:
+            raise ValueError("No album media could be sent")
+
         return sent_messages
-    
+
     else:
-        # Single file - create appropriate InputMedia
-        if file.type == "photo":
-            input_file = InputPhoto(
-                id=file.file_id,
-                access_hash=file.access_hash,
-                file_reference=file.file_reference
-            )
-        else:
-            input_file = InputDocument(
-                id=file.file_id,
-                access_hash=file.access_hash,
-                file_reference=file.file_reference
-            )
-        
         caption = build_file_caption(file.caption, settings) + footer
 
         # Send the file using InputMedia
-        message = await client.send_file(
-            chat_id,
-            file=input_file,
+        message = await _send_stored_media(
+            client, chat_id, file, storage_channel_id,
             caption=caption,
         )
-        
-        # Increment count after successful send
-        file.count += 1
-        await file.save()
-        
+
         return [message]
 
 
@@ -314,6 +358,7 @@ async def broadcast_to_users(
             if cancel_event and cancel_event.is_set():
                 return
             await wait_for_flood_cooldown()
+            retry_error = None
             try:
                 async with semaphore:
                     # A worker may have set a cooldown while this one was
@@ -327,6 +372,7 @@ async def broadcast_to_users(
                 await report_delivery(user.userid, True)
                 return
             except FloodWaitError as error:
+                retry_error = error
                 wait_time = await extend_flood_cooldown(
                     max(error.seconds, 30) + random.uniform(3, 10)
                 )
@@ -336,6 +382,7 @@ async def broadcast_to_users(
                     user.userid,
                 )
             except InvalidBufferError as error:
+                retry_error = error
                 if "429" not in str(error):
                     await mark_failed(user, error)
                     return
@@ -372,7 +419,7 @@ async def broadcast_to_users(
                 return
 
             if attempt == max_retries:
-                await mark_failed(user, error)
+                await mark_failed(user, retry_error or RuntimeError("broadcast retries exhausted"))
                 return
 
             # The cooldown is global, so this sleep lets other tasks observe

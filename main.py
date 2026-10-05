@@ -7,6 +7,9 @@ import csv
 import io
 import logging
 import re
+import time
+import uuid
+from pathlib import Path
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -14,7 +17,6 @@ from functools import wraps
 from typing import Awaitable, Callable, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
-import uvloop
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from decouple import config
 from telethon import Button, TelegramClient, events, types
@@ -37,6 +39,11 @@ from telethon.tl.types import (
 from telethon.utils import pack_bot_file_id
 
 from core.database import close_db, init_db
+from core.maintenance import get_gate
+from services.backup import create_data_backup, backup_directory
+from services.restore import PreparedRestore, RestoreError, prepare_restore, apply_restore
+from services.file import read_album_files, save_file_fields
+from app.factory import get_bot_factory
 from core.models import File, User
 from core.state import State
 from core.upload_session import get_upload_manager
@@ -77,6 +84,7 @@ from utils.keyboard import (
     JOIN_KEYBOARD,
     START_KEYBOARD,
     UPLOAD_SESSION_KEYBOARD,
+    RESTORE_CONFIRM_KEYBOARD,
     channel_join_btn,
 )
 from utils.text import (
@@ -111,30 +119,39 @@ STORAGE_CHANNEL_ID = int(config("STORAGE_CHANNEL_ID", default="0"))
 SESSION_NAME = config("SESSION_NAME", default="cutly")
 WORKERS = int(config("WORKERS", default="20"))
 
-if SESSION_STRING:
-    CLIENT = TelegramClient(
-        StringSession(SESSION_STRING),
-        API_ID,
-        API_HASH,
-        connection_retries=5,
-        auto_reconnect=True,
-        timeout=30,
-        request_retries=3,
-        flood_sleep_threshold=60,
-    )
-else:
-    CLIENT = TelegramClient(
-        SESSION_NAME,
-        API_ID,
-        API_HASH,
-        connection_retries=5,
-        auto_reconnect=True,
-        timeout=30,
-        request_retries=3,
-        flood_sleep_threshold=60,
-    )
+CLIENT = get_bot_factory().create_client()
 
-CLIENT.parse_mode = "md"
+# Drain in-flight operations before replacing rows. Filters may have already
+# matched before waiting, so discard handlers from the previous generation.
+_client_on = CLIENT.on
+
+
+def _guarded_on(builder):
+    register = _client_on(builder)
+
+    def decorate(handler):
+        if handler.__name__ == "handle_restore_confirm":
+            return register(handler)
+
+        @wraps(handler)
+        async def guarded(event):
+            gate = get_gate()
+            if gate.restoring or gate.writers_waiting:
+                if event.is_private:
+                    await event.client.send_message(event.sender_id, "♻️ بازیابی در حال انجام است؛ کمی بعد دوباره تلاش کنید.")
+                raise events.StopPropagation
+            generation = getattr(event, "_cutly_generation", gate.generation)
+            async with gate.operation():
+                if generation != gate.generation:
+                    raise events.StopPropagation
+                return await handler(event)
+
+        register(guarded)
+        return guarded
+    return decorate
+
+
+CLIENT.on = _guarded_on
 
 Handler = Callable[[events.NewMessage.Event], Awaitable[None]]
 
@@ -142,9 +159,10 @@ CONVERSATION_STATE: Dict[int, Optional[State]] = {}
 CONVERSATION_OBJECT: Dict[int, Optional[File]] = {}
 LIST_VIDEO: List[Dict[str, int]] = []
 USER_LIST: List[int] = []
+USER_IDS: set[int] = set()
 CHANNEL_JOIN_LIST: Optional[Dict[str, Dict[str, str]]] = None
 BOT_USERNAME: str = ""
-SCHEDULER = AsyncIOScheduler()
+SCHEDULER = get_bot_factory().create_scheduler()
 ADMIN_PREDICATE = admin_filter(ADMIN_MASTER)
 BROADCAST_IN_PROGRESS = False
 BROADCAST_CANCEL_EVENT: Optional[asyncio.Event] = None
@@ -164,6 +182,7 @@ class BroadcastDraft:
 
 BROADCAST_DRAFTS: Dict[int, BroadcastDraft] = {}
 ADMIN_LOG_CONTEXT: Dict[int, int] = {}
+RESTORE_DRAFTS: Dict[int, Tuple[PreparedRestore, float]] = {}
 USER_COMMANDS = {
     "/start",
     "🗳 آپلود فایل",
@@ -186,6 +205,9 @@ USER_COMMANDS = {
     "👤 افزودن ادمین",
     "📈آمار",
     "🔌بک آپ",
+    "📦 بک‌آپ داده‌ها",
+    "♻️ بازیابی بک‌آپ",
+    "✅ تأیید بازیابی",
     "📜 لاگ کاربر",
     "👥 همه کاربران",
     "🆕 کاربران جدید",
@@ -205,6 +227,8 @@ USER_COMMANDS = {
     "🔁 روشن/خاموش کپشن فایل‌ها",
 }
 ADMIN_CONTEXT_STATES = {
+    State.USER_RESTORE_UPLOAD,
+    State.USER_RESTORE_CONFIRM,
     State.USER_ADMIN_PANEL,
     State.USER_SET_ADMIN,
     State.USER_UNSET_ADMIN,
@@ -230,11 +254,11 @@ def is_user_command(text: Optional[str]) -> bool:
 
 def is_valid_code(code: str, max_length: int = 32) -> bool:
     """Validate file code length.
-    
+
     Args:
         code: File code to validate.
         max_length: Maximum allowed length (default: 32 chars).
-        
+
     Returns:
         True if code length is valid, False otherwise.
     """
@@ -322,25 +346,26 @@ async def send_global_caption_menu(client: TelegramClient, user_id: int, first_n
 
 async def build_channel_join_list(client: TelegramClient) -> Dict[str, Dict[str, str]]:
     """Build a cache of mandatory join channels with Redis caching.
-    
+
     Checks Redis cache first for fast access. Falls back to building from
     database if cache miss, then updates cache for next time.
     """
     from core.cache import get_cache
-    
+
     cache = get_cache()
-    
+
     # Try Redis cache first
     cached_channels = await cache.get_channel_list()
     if cached_channels is not None:
         LOGGER.debug(f"✅ Channel list loaded from Redis cache ({len(cached_channels)} channels)")
         return cached_channels
-    
+
     # Cache miss - build from database
+    version = await cache.version("channels")
     LOGGER.info("⚠️ Channel cache miss, loading from database...")
     payload: Dict[str, Dict[str, str]] = {}
     channels = await read_channels_from_db()
-    
+
     async def fetch_channel_info(channel) -> Tuple[str, str, str]:
         """Fetch channel title or return channel_id as fallback."""
         title = channel.channel_id
@@ -351,7 +376,7 @@ async def build_channel_join_list(client: TelegramClient) -> Dict[str, Dict[str,
                 entity_id = int(channel_id)
             else:
                 entity_id = channel_id
-            
+
             # Use get_entity which uses Telethon's internal cache
             entity = await client.get_entity(entity_id)
             if getattr(entity, "title", None):
@@ -359,35 +384,37 @@ async def build_channel_join_list(client: TelegramClient) -> Dict[str, Dict[str,
         except (ValueError, ChannelInvalidError, ChannelPrivateError) as exc:
             LOGGER.warning("Unable to resolve channel %s: %s", channel.channel_id, exc)
         return channel.channel_id, title, channel.channel_link
-    
+
     # Fetch all channel info concurrently with Telethon's built-in caching
     results = await asyncio.gather(
         *[fetch_channel_info(ch) for ch in channels],
         return_exceptions=True,
     )
-    
+
     for result in results:
         if isinstance(result, Exception):
             continue
         channel_id, title, link = result
         payload[channel_id] = {"title": title, "link": link}
-    
+
     # Update Redis cache for next time
-    cache_updated = await cache.set_channel_list(payload)
+    cache_updated = await cache.set_channel_list(payload, version=version)
+    if version is not None and await cache.version("channels") != version:
+        return await build_channel_join_list(client)
     if cache_updated:
         LOGGER.info(f"✅ Channel list cached in Redis ({len(payload)} channels)")
-    
+
     return payload
 
 
 async def refresh_channel_join_cache(client: TelegramClient) -> None:
     """Force refresh the join cache after mutations."""
-    
+
     LOGGER.info("🔄 Refreshing channel join cache...")
 
     global CHANNEL_JOIN_LIST
     CHANNEL_JOIN_LIST = await build_channel_join_list(client)
-    
+
     LOGGER.info(f"✅ Channel join cache refreshed ({len(CHANNEL_JOIN_LIST)} channels)")
 
 
@@ -402,26 +429,26 @@ async def ensure_channel_join_list(client: TelegramClient) -> Dict[str, Dict[str
 
 async def ensure_user_record(user_id: int) -> None:
     """Persist the user in the database if they are new.
-    
-    Always checks database to ensure user exists, even if in memory list.
-    This is important after database recreation.
+
+    Read complete cached metadata, falling back to SQL. Restores clear both
+    Redis and the local ID set before operations resume.
     """
-    
-    # Check if user exists in database (more reliable than memory list)
-    from core.models import User
-    user_exists = await User.filter(userid=user_id).exists()
-    
+
+    user_exists = await read_user_from_db(user_id)
+
     if not user_exists:
         # Create user in database
         await create_user_from_db({"userid": user_id})
         LOGGER.info(f"✅ User {user_id} created in database")
-        
+
         # Add to memory list if not there
-        if user_id not in USER_LIST:
+        if user_id not in USER_IDS:
             USER_LIST.append(user_id)
-    elif user_id not in USER_LIST:
+            USER_IDS.add(user_id)
+    elif user_id not in USER_IDS:
         # User exists in DB but not in memory list - add to list
         USER_LIST.append(user_id)
+        USER_IDS.add(user_id)
     await touch_user_activity(user_id)
 
 
@@ -440,7 +467,7 @@ async def enforce_channel_membership(event: events.NewMessage.Event) -> bool:
     channels = await ensure_channel_join_list(event.client)
     if not channels:
         return True
-    
+
     async def check_membership(channel_id: str, data: Dict[str, str]) -> Optional[Dict[str, str]]:
         """Check if user is member or admin of channel, return data if not."""
         try:
@@ -451,14 +478,14 @@ async def enforce_channel_membership(event: events.NewMessage.Event) -> bool:
                 entity = int(channel_id)
             else:
                 entity = channel_id
-            
+
             # Get user permissions in the channel
             # This will raise UserNotParticipantError if not a member
-            permissions = await event.client.get_permissions(entity, event.sender_id)
-            
+            await event.client.get_permissions(entity, event.sender_id)
+
             # If we got permissions, user is a member (or admin/creator)
             return None
-                
+
         except UserNotParticipantError:
             # User is definitely not a member
             LOGGER.info(f"User {event.sender_id} is not a member of {channel_id}")
@@ -467,18 +494,18 @@ async def enforce_channel_membership(event: events.NewMessage.Event) -> bool:
             # Any other error, log it and treat as not a member to be safe
             LOGGER.error(f"Error checking membership for {channel_id}: {e}")
             return data
-    
+
     # Check all channels concurrently
     results = await asyncio.gather(
         *[check_membership(ch_id, data) for ch_id, data in channels.items()],
         return_exceptions=True,
     )
-    
+
     missing = [r for r in results if r is not None and not isinstance(r, Exception)]
-    
+
     if not missing:
         return True
-    
+
     buttons = [[channel_join_btn(item["title"], item["link"])] for item in missing]
     token = (event.raw_text or "").split(" ")[-1] if event.raw_text else ""
     start_param = token if token.startswith("get_") else ""
@@ -510,17 +537,21 @@ async def ensure_access(
 async def cleanup_messages(client: TelegramClient) -> None:
     """Delete temporary media previews after the cooldown in parallel."""
 
+    for user_id, (_, created) in list(RESTORE_DRAFTS.items()):
+        if time.monotonic() - created > 1800:
+            clear_restore_draft(user_id)
+
     if not LIST_VIDEO:
         return
     pending = LIST_VIDEO.copy()
     LIST_VIDEO.clear()
-    
+
     async def delete_single(record: Dict[str, int]) -> None:
         try:
             await client.delete_messages(record["chat_id"], record["message_id"])
         except Exception as exc:  # noqa: BLE001
             LOGGER.debug("Unable to delete message %s: %s", record, exc)
-    
+
     # Delete all messages concurrently
     await asyncio.gather(*[delete_single(record) for record in pending], return_exceptions=True)
 
@@ -564,13 +595,13 @@ def detect_media_payload(message: TelethonMessage) -> Tuple[str, int, int, int, 
 
     if not message.media or isinstance(message.media, types.MessageMediaWebPage):  # type: ignore[attr-defined]
         raise ValueError("unsupported message type")
-    
+
     media_type = "document"
     size = 0
     file_id = 0
     access_hash = 0
     file_reference = b""
-    
+
     if isinstance(message.media, MessageMediaPhoto):
         media_type = "photo"
         # For photos, get size from largest photo size
@@ -582,7 +613,7 @@ def detect_media_payload(message: TelethonMessage) -> Tuple[str, int, int, int, 
         file_id = message.photo.id
         access_hash = message.photo.access_hash
         file_reference = message.photo.file_reference
-        
+
     elif isinstance(message.media, MessageMediaDocument):
         attributes = message.document.attributes or []
         if any(isinstance(attr, DocumentAttributeSticker) for attr in attributes):
@@ -596,7 +627,7 @@ def detect_media_payload(message: TelethonMessage) -> Tuple[str, int, int, int, 
                 attr for attr in attributes if isinstance(attr, DocumentAttributeAudio)
             )
             media_type = "voice" if attr_audio.voice else "audio"
-        
+
         size = message.document.size if hasattr(message.document, 'size') else 0
         # Extract file identifiers
         file_id = message.document.id
@@ -604,7 +635,7 @@ def detect_media_payload(message: TelethonMessage) -> Tuple[str, int, int, int, 
         file_reference = message.document.file_reference
     else:
         raise ValueError("unsupported message type")
-    
+
     return media_type, size, file_id, access_hash, file_reference
 
 
@@ -649,7 +680,8 @@ async def handle_get_file(event: events.NewMessage.Event) -> None:
         for message in messages:
             if message:
                 LIST_VIDEO.append({"chat_id": message.chat_id, "message_id": message.id})
-        await record_file_access(event.sender_id, file)
+        if messages:
+            await record_file_access(event.sender_id, file)
         return
     CONVERSATION_OBJECT[event.sender_id] = file
     set_state(event.sender_id, State.USER_SEND_PASSWORD_FOR_GET_FILE)
@@ -896,7 +928,7 @@ async def handle_admin_list(event: events.NewMessage.Event) -> None:
     """Display all privileged users fetched concurrently."""
 
     users = await read_users(is_admin=True)
-    
+
     async def get_user_info(user) -> str:
         """Fetch user entity and format info."""
         try:
@@ -904,18 +936,18 @@ async def handle_admin_list(event: events.NewMessage.Event) -> None:
             return f"👤 {get_display_name(entity)} \n🆔 {user.userid} \n\n"
         except ValueError:
             return f"👤 --- \n🆔 {user.userid} \n\n"
-    
+
     # Fetch all user info concurrently
     user_infos = await asyncio.gather(
         *[get_user_info(user) for user in users],
         return_exceptions=True,
     )
-    
+
     text = "👥 لیست ادمین ها : \n\n"
     for info in user_infos:
         if not isinstance(info, Exception):
             text += info
-    
+
     await event.client.send_message(event.sender_id, text, buttons=ADMIN_KEYBOARD)
 
 
@@ -934,18 +966,141 @@ async def handle_backup(event: events.NewMessage.Event) -> None:
 
     file_path = await create_backup()
     if file_path:
-        await event.client.send_file(
-            event.sender_id,
-            file=file_path,
-            caption="📤 بک آپ ربات شما ...",
-            buttons=ADMIN_KEYBOARD,
-        )
+        try:
+            await event.client.send_file(
+                event.sender_id, file=file_path,
+                caption="📤 دامپ کامل دیتابیس ربات (schema و داده‌ها)",
+                buttons=ADMIN_KEYBOARD,
+            )
+        finally:
+            Path(file_path).unlink(missing_ok=True)
     else:
         await event.client.send_message(
             event.sender_id,
             "❌ مشکلی در ایجاد بک آپ رخ داده است !",
             buttons=ADMIN_KEYBOARD,
         )
+
+
+@CLIENT.on(events.NewMessage(pattern=r"^📦 بک‌آپ داده‌ها$", func=compose_filters(
+    private_only(), conversation(CONVERSATION_STATE, State.USER_ADMIN_PANEL), ADMIN_PREDICATE)))
+async def handle_data_backup(event):
+    path = None
+    try:
+        path = await create_data_backup()
+        await event.client.send_file(event.sender_id, file=path,
+            caption="📦 بک‌آپ فقط داده‌ها؛ قابل بازیابی روی PostgreSQL و SQLite", buttons=ADMIN_KEYBOARD)
+    except Exception:
+        LOGGER.exception("Data backup failed")
+        await event.client.send_message(event.sender_id, "❌ ساخت بک‌آپ داده‌ها ناموفق بود.", buttons=ADMIN_KEYBOARD)
+    finally:
+        if path:
+            Path(path).unlink(missing_ok=True)
+
+
+def clear_restore_draft(user_id):
+    draft = RESTORE_DRAFTS.pop(user_id, None)
+    if draft:
+        draft[0].close()
+
+
+@CLIENT.on(events.NewMessage(pattern=r"^♻️ بازیابی بک‌آپ$", func=compose_filters(
+    private_only(), conversation(CONVERSATION_STATE, State.USER_ADMIN_PANEL), ADMIN_PREDICATE)))
+async def handle_restore_prompt(event):
+    clear_restore_draft(event.sender_id)
+    set_state(event.sender_id, State.USER_RESTORE_UPLOAD)
+    await event.client.send_message(event.sender_id,
+        "بک‌آپ کامل یا فقط داده‌ها را ارسال کنید: SQL، SQL.gz، آرشیو custom/tar یا jsonl.gz ربات.\n"
+        "پس از بررسی فایل، تعداد رکوردها نمایش داده می‌شود. با تأیید شما داده‌های فعلی جایگزین می‌شوند؛ schema فعلی حفظ می‌شود.",
+        buttons=BACK_KEYBOARD)
+    raise events.StopPropagation
+
+
+@CLIENT.on(events.NewMessage(func=compose_filters(private_only(),
+    conversation(CONVERSATION_STATE, State.USER_RESTORE_UPLOAD), ADMIN_PREDICATE)))
+async def handle_restore_upload(event):
+    if is_user_command(event.raw_text):
+        return
+    if not getattr(event.message, "document", None):
+        await event.client.send_message(event.sender_id, "لطفاً فایل بک‌آپ را به صورت document ارسال کنید.", buttons=BACK_KEYBOARD)
+        return
+    maximum = config("RESTORE_MAX_BYTES", default=2 * 1024**3, cast=int)
+    if event.message.document.size > maximum:
+        await event.client.send_message(event.sender_id, "❌ حجم بک‌آپ بیش از حد مجاز است.", buttons=BACK_KEYBOARD)
+        return
+    path = backup_directory() / f"upload-{uuid.uuid4().hex}.backup"
+    try:
+        await event.client.download_media(event.message, file=str(path))
+        prepared = await prepare_restore(path)
+        clear_restore_draft(event.sender_id)
+        RESTORE_DRAFTS[event.sender_id] = (prepared, time.monotonic())
+        set_state(event.sender_id, State.USER_RESTORE_CONFIRM)
+        counts = "\n".join(f"{name}: {count:,}" for name, count in prepared.counts.items())
+        await event.client.send_message(event.sender_id,
+            f"فایل بررسی شد. نسخهٔ مبدأ: {prepared.source_version or 'قالب دادهٔ مستقل از نسخه'}\n{counts}\n\n"
+            "با تأیید، تمام داده‌های فعلی ربات جایگزین می‌شوند. یک نسخهٔ ایمنی از داده‌های فعلی نیز ذخیره می‌شود.",
+            buttons=RESTORE_CONFIRM_KEYBOARD)
+    except RestoreError as error:
+        await event.client.send_message(event.sender_id, f"❌ {error}", buttons=BACK_KEYBOARD)
+    except Exception:
+        LOGGER.exception("Restore upload preparation failed")
+        await event.client.send_message(event.sender_id, "❌ بررسی بک‌آپ ناموفق بود؛ فایل و ابزار pg_restore را بررسی کنید.", buttons=BACK_KEYBOARD)
+    finally:
+        path.unlink(missing_ok=True)
+    raise events.StopPropagation
+
+
+async def reset_after_restore():
+    global CHANNEL_JOIN_LIST
+    CONVERSATION_STATE.clear()
+    CONVERSATION_OBJECT.clear()
+    USER_LIST.clear()
+    USER_IDS.clear()
+    CHANNEL_JOIN_LIST = None
+    BROADCAST_DRAFTS.clear()
+    ADMIN_LOG_CONTEXT.clear()
+    get_upload_manager()._sessions.clear()
+    for user_id in list(RESTORE_DRAFTS):
+        clear_restore_draft(user_id)
+    for job in SCHEDULER.get_jobs():
+        if job.func == execute_professional_broadcast:
+            SCHEDULER.remove_job(job.id)
+
+
+@CLIENT.on(events.NewMessage(pattern=r"^✅ تأیید بازیابی$", func=compose_filters(
+    private_only(), conversation(CONVERSATION_STATE, State.USER_RESTORE_CONFIRM), ADMIN_PREDICATE)))
+async def handle_restore_confirm(event):
+    # This handler must acquire the exclusive gate itself, outside read guards.
+    if not event.is_private or not await ADMIN_PREDICATE(event):
+        return
+    draft = RESTORE_DRAFTS.pop(event.sender_id, None)
+    if not draft:
+        return
+    prepared, created = draft
+    generation = get_gate().generation
+    committed = False
+    try:
+        if time.monotonic() - created > 1800:
+            raise RestoreError("پیش‌نمایش منقضی شده است؛ بک‌آپ را دوباره ارسال کنید.")
+        if BROADCAST_IN_PROGRESS:
+            raise RestoreError("ابتدا ارسال همگانی فعال را تمام یا لغو کنید.")
+        result = await apply_restore(prepared, on_restored=reset_after_restore, expected_generation=generation)
+        committed = True
+        set_state(event.sender_id, State.USER_ADMIN_PANEL)
+        await event.client.send_file(event.sender_id, file=result.safety_backup,
+            caption="✅ بازیابی انجام شد. این فایل نسخهٔ ایمنیِ داده‌های قبل از بازیابی است.", buttons=ADMIN_KEYBOARD)
+    except Exception as error:
+        LOGGER.exception("Restore failed")
+        set_state(event.sender_id, State.USER_ADMIN_PANEL)
+        if committed:
+            await event.client.send_message(event.sender_id,
+                "✅ بازیابی انجام شد؛ ارسال نسخهٔ ایمنی ناموفق بود. فایل در پوشهٔ backup سرور محفوظ است.", buttons=ADMIN_KEYBOARD)
+        else:
+            message = str(error) if isinstance(error, RestoreError) else "بازیابی ناموفق بود؛ داده‌های فعلی حفظ شدند."
+            await event.client.send_message(event.sender_id, f"❌ {message}", buttons=ADMIN_KEYBOARD)
+    finally:
+        prepared.close()
+    raise events.StopPropagation
 
 
 @CLIENT.on(
@@ -1129,6 +1284,8 @@ async def handle_back(event: events.NewMessage.Event) -> None:
     if not await ensure_access(event):
         raise events.StopPropagation
     current_state = CONVERSATION_STATE.get(event.sender_id)
+    if current_state in (State.USER_RESTORE_UPLOAD, State.USER_RESTORE_CONFIRM):
+        clear_restore_draft(event.sender_id)
     sender = await event.get_sender()
     if current_state in (State.USER_ADD_CHANNEL, State.USER_REMOVE_CHANNEL):
         set_state(event.sender_id, State.USER_JOIN_CHANNEL_PANEL)
@@ -1169,11 +1326,11 @@ async def handle_upload_prompt(event: events.NewMessage.Event) -> None:
 
     if not await ensure_access(event):
         raise events.StopPropagation
-    
+
     # Start new upload session
     upload_manager = get_upload_manager()
     upload_manager.start_session(event.sender_id)
-    
+
     set_state(event.sender_id, State.USER_UPLOAD_FILE)
     await event.client.send_message(
         event.sender_id,
@@ -1283,51 +1440,51 @@ async def handle_file_history(event: events.NewMessage.Event) -> None:
 
     if not await ensure_access(event):
         raise events.StopPropagation
-    
+
     # Get all user files
     all_files = await read_files_from_db(userid=event.sender_id)
     if not all_files:
         await event.client.send_message(event.sender_id, "❌ فایلی یافت نشد !")
         return
-    
+
     # Filter to only main files (first in album or standalone)
     # Skip _part files which are additional items in an album
     main_files = []
     seen_albums = set()
-    
+
     for file in all_files:
         # If it has album_id and we've seen it, skip
         if file.album_id:
             if file.album_id in seen_albums:
                 continue
             seen_albums.add(file.album_id)
-        
+
         # Only include if code doesn't contain "_part"
         if "_part" not in file.code:
             main_files.append(file)
-    
+
     if not main_files:
         await event.client.send_message(event.sender_id, "❌ فایلی یافت نشد !")
         return
-    
+
     # Group files into batches of 5
     batch_size = 5
     total_files = len(main_files)
-    
+
     for batch_idx in range(0, total_files, batch_size):
         batch = main_files[batch_idx:batch_idx + batch_size]
-        
+
         # Build message text for this batch
         lines = [
             f"📂 **تاریخچه آپلود** (دسته {(batch_idx // batch_size) + 1})",
             "━━━━━━━━━━━━━━━━━━━━",
         ]
-        
+
         for local_idx, file in enumerate(batch):
             display_idx = batch_idx + local_idx + 1
             # Check if this is an album
             if file.album_id:
-                album_files = await File.filter(album_id=file.album_id).order_by("album_order")
+                album_files = await read_album_files(file.album_id)
                 album_count = len(album_files)
                 type_labels = {
                     "photo": "عکس",
@@ -1353,13 +1510,13 @@ async def handle_file_history(event: events.NewMessage.Event) -> None:
                 icon, label = type_icons.get(file.type, ("📁", file.type))
                 file_type_display = f"{icon} {label}"
                 size_display = format_file_size(file.size)
-            
+
             # Format date
             date_str = file.created_at.strftime("%Y/%m/%d")
-            
+
             if local_idx > 0:
                 lines.append("────────────────────")
-            
+
             lines.extend(
                 [
                     f"{display_idx}. شناسه: `{file.code}`",
@@ -1372,19 +1529,19 @@ async def handle_file_history(event: events.NewMessage.Event) -> None:
                     f"• 🔗 https://t.me/{BOT_USERNAME}?start=get_{file.code}",
                 ]
             )
-        
+
         text = "\n".join(lines).strip()
-        
+
         # Send keyboard only on last batch
         is_last_batch = (batch_idx + batch_size) >= total_files
         keyboard = START_KEYBOARD if is_last_batch else None
-        
+
         await event.client.send_message(
             event.sender_id,
             text,
             buttons=keyboard
         )
-        
+
         # Small delay between batches
         if not is_last_batch:
             await asyncio.sleep(0.3)
@@ -1445,10 +1602,10 @@ async def handle_add_channel(event: events.NewMessage.Event) -> None:
         return
     await create_channel_from_db({"channel_id": channel_id, "channel_link": channel_link})
     LOGGER.info(f"➕ Channel added: {channel_id} | {channel_link} | by user {event.sender_id}")
-    
+
     set_state(event.sender_id, State.USER_JOIN_CHANNEL_PANEL)
     await refresh_channel_join_cache(event.client)
-    
+
     await event.client.send_message(
         event.sender_id,
         "✅ کانال با موفقیت اضافه شد !",
@@ -1470,16 +1627,16 @@ async def handle_remove_channel(event: events.NewMessage.Event) -> None:
 
     if is_user_command(event.raw_text):
         return
-    
+
     channel_identifier = event.raw_text or ""
     removed = await delete_channel_from_db(channel_identifier)
-    
+
     if removed:
         LOGGER.info(f"➖ Channel removed: {channel_identifier} | by user {event.sender_id}")
-        
+
         set_state(event.sender_id, State.USER_JOIN_CHANNEL_PANEL)
         await refresh_channel_join_cache(event.client)
-        
+
         await event.client.send_message(
             event.sender_id,
             "✅ کانال با موفقیت حذف شد !",
@@ -1487,7 +1644,7 @@ async def handle_remove_channel(event: events.NewMessage.Event) -> None:
         )
     else:
         LOGGER.warning(f"❌ Channel not found for removal: {channel_identifier} | by user {event.sender_id}")
-        
+
         await event.client.send_message(
             event.sender_id,
             "❌ کانال یافت نشد !",
@@ -1777,6 +1934,15 @@ async def handle_broadcast_channel(event: events.NewMessage.Event) -> None:
 
 
 async def execute_professional_broadcast(draft: BroadcastDraft) -> None:
+    gate = get_gate()
+    generation = gate.generation
+    async with gate.operation():
+        if generation != gate.generation:
+            return
+        await _execute_professional_broadcast(draft)
+
+
+async def _execute_professional_broadcast(draft: BroadcastDraft) -> None:
     """Run one confirmed or scheduled broadcast and send a CSV delivery report."""
     global BROADCAST_IN_PROGRESS, BROADCAST_CANCEL_EVENT
     while BROADCAST_IN_PROGRESS:
@@ -2037,26 +2203,26 @@ async def handle_tracking_request(event: events.NewMessage.Event) -> None:
             buttons=BACK_KEYBOARD,
         )
         return
-    
+
     # Build detailed info
     lines = [
-        f"🗂 **اطلاعات فایل**\n",
+        "🗂 **اطلاعات فایل**\n",
         f"▪️ شناسه: `{code}`\n"
     ]
-    
+
     # Check if this is an album
     if file.album_id:
-        album_files = await File.filter(album_id=file.album_id).order_by("album_order")
+        album_files = await read_album_files(file.album_id)
         album_count = len(album_files)
         total_size = sum(f.size for f in album_files)
-        
+
         # Count types
         types_count = {}
         for f in album_files:
             types_count[f.type] = types_count.get(f.type, 0) + 1
-        
+
         types_display = ", ".join([f"{count} {type}" for type, count in types_count.items()])
-        
+
         lines.append(f"📦 نوع: آلبوم ({album_count} فایل: {types_display})")
         lines.append(f"💾 حجم کل: {total_size} KB")
     else:
@@ -2070,7 +2236,7 @@ async def handle_tracking_request(event: events.NewMessage.Event) -> None:
         icon = type_icons.get(file.type, "📁")
         lines.append(f"{icon} نوع: {file.type}")
         lines.append(f"💾 حجم: {file.size} KB")
-    
+
     lines.append(f"🗞 کپشن: {file.caption or 'ندارد'}")
     lines.append(f"🔐 رمز: {file.password or 'ندارد'}")
     lines.append(f"👁 دانلود: {file.count} بار")
@@ -2078,9 +2244,9 @@ async def handle_tracking_request(event: events.NewMessage.Event) -> None:
     lines.append(f"🎯 سقف دانلود: {file.max_downloads if file.max_downloads is not None else 'بدون محدودیت'}")
     lines.append(f"🕓 تاریخ آپلود: {file.created_at.strftime('%Y/%m/%d %H:%M')}\n")
     lines.append(f"📥 لینک اشتراک گذاری:\nhttps://t.me/{BOT_USERNAME}?start=get_{code}")
-    
+
     text = "\n".join(lines)
-    
+
     await event.client.send_message(event.sender_id, text, buttons=START_KEYBOARD)
     reset_context(event.sender_id)
     raise events.StopPropagation
@@ -2095,10 +2261,12 @@ async def handle_passworded_file(event: events.NewMessage.Event) -> None:
     if is_user_command(event.raw_text):
         return
     file = CONVERSATION_OBJECT.get(event.sender_id)
+    if file:
+        file = await read_file_from_db(file.code)
     if not file:
         reset_context(event.sender_id)
         return
-    if file.password == (event.raw_text or ""):
+    if not file.password or file.password == (event.raw_text or ""):
         if not await ensure_file_is_available(event, file):
             reset_context(event.sender_id)
             raise events.StopPropagation
@@ -2114,7 +2282,8 @@ async def handle_passworded_file(event: events.NewMessage.Event) -> None:
         for message in messages:
             if message:
                 LIST_VIDEO.append({"chat_id": message.chat_id, "message_id": message.id})
-        await record_file_access(event.sender_id, file)
+        if messages:
+            await record_file_access(event.sender_id, file)
         reset_context(event.sender_id)
         raise events.StopPropagation
     else:
@@ -2150,7 +2319,7 @@ async def handle_unset_password(event: events.NewMessage.Event) -> None:
         )
         return
     file.password = None
-    await file.save()
+    await save_file_fields(file, "password")
     await event.client.send_message(
         event.sender_id,
         "✅ پسورد با موفقیت حذف شد !",
@@ -2207,7 +2376,7 @@ async def handle_set_password(event: events.NewMessage.Event) -> None:
         reset_context(event.sender_id)
         return
     file.password = event.raw_text or ""
-    await file.save()
+    await save_file_fields(file, "password")
     await event.client.send_message(
         event.sender_id,
         "✅ پسورد با موفقیت ثبت شد !",
@@ -2242,7 +2411,7 @@ async def handle_unset_caption(event: events.NewMessage.Event) -> None:
         )
         return
     file.caption = None
-    await file.save()
+    await save_file_fields(file, "caption")
     await event.client.send_message(
         event.sender_id,
         "✅ کپشن با موفقیت حذف شد !",
@@ -2299,7 +2468,7 @@ async def handle_set_caption(event: events.NewMessage.Event) -> None:
         reset_context(event.sender_id)
         return
     file.caption = event.raw_text or ""
-    await file.save()
+    await save_file_fields(file, "caption")
     await event.client.send_message(
         event.sender_id,
         "✅ کپشن با موفقیت ثبت شد !",
@@ -2373,17 +2542,17 @@ async def handle_upload_album(event: events.Album.Event) -> None:
             "❌ سرور ذخیره‌سازی تنظیم نشده است! لطفاً STORAGE_CHANNEL_ID را در .env تنظیم کنید.",
         )
         return
-    
+
     upload_manager = get_upload_manager()
     session = upload_manager.get_session(event.sender_id)
-    
+
     if not session:
         await event.client.send_message(
             event.sender_id,
             "❌ جلسه آپلود یافت نشد! لطفاً دوباره تلاش کنید.",
         )
         return
-    
+
     # First, validate all files in the album and extract their identifiers
     validated_files = []
     for msg in event.messages:
@@ -2396,7 +2565,7 @@ async def handle_upload_album(event: events.Album.Event) -> None:
                 "❌ یکی از فایل‌های گروه شما پشتیبانی نمیشود! لطفاً فقط عکس، ویدیو، صوت یا سند ارسال کنید.",
             )
             return
-    
+
     # If all files are valid, proceed with forwarding
     try:
         # Forward all messages in album to storage channel (for backup/viewing)
@@ -2404,7 +2573,7 @@ async def handle_upload_album(event: events.Album.Event) -> None:
             STORAGE_CHANNEL_ID,
             event.messages
         )
-        
+
         # Add each file to session with full metadata
         for (_, media_type, size, file_id, access_hash, file_reference), forwarded_msg in zip(validated_files, forwarded_messages):
             session.add_file(
@@ -2415,7 +2584,7 @@ async def handle_upload_album(event: events.Album.Event) -> None:
                 access_hash=access_hash,
                 file_reference=file_reference
             )
-        
+
         summary = session.get_summary()
         await event.client.send_message(
             event.sender_id,
@@ -2425,7 +2594,7 @@ async def handle_upload_album(event: events.Album.Event) -> None:
             ),
             buttons=UPLOAD_SESSION_KEYBOARD,
         )
-        
+
     except Exception as e:
         LOGGER.error(f"Failed to store album: {e}")
         await event.client.send_message(
@@ -2440,25 +2609,25 @@ async def handle_upload_file(event: events.NewMessage.Event) -> None:
 
     if is_user_command(event.raw_text):
         return
-    
+
     message = event.message
-    
+
     # Skip if this message is part of an album (will be handled by handle_upload_album)
     if message.grouped_id is not None:
         return
-    
+
     # Skip if this is a button text (will be handled by other handlers)
     button_texts = ["✅ اتمام ارسال فایل", "❌ لغو و بازگشت", "🔙 بازگشت"]
     if message.text and message.text in button_texts:
         return
-    
+
     if message.text or message.sticker or not message.media:
         await event.client.send_message(
             event.sender_id,
             "❌ فایل شما پشتیبانی نمیشود !",
         )
         return
-    
+
     # Check if storage channel is configured
     if not STORAGE_CHANNEL_ID:
         await event.client.send_message(
@@ -2466,17 +2635,17 @@ async def handle_upload_file(event: events.NewMessage.Event) -> None:
             "❌ سرور ذخیره‌سازی تنظیم نشده است! لطفاً STORAGE_CHANNEL_ID را در .env تنظیم کنید.",
         )
         return
-    
+
     upload_manager = get_upload_manager()
     session = upload_manager.get_session(event.sender_id)
-    
+
     if not session:
         await event.client.send_message(
             event.sender_id,
             "❌ جلسه آپلود یافت نشد! لطفاً دوباره تلاش کنید.",
         )
         return
-    
+
     try:
         media_type, size, file_id, access_hash, file_reference = detect_media_payload(message)
     except ValueError:
@@ -2485,7 +2654,7 @@ async def handle_upload_file(event: events.NewMessage.Event) -> None:
             "❌ فایل شما پشتیبانی نمیشود !",
         )
         return
-    
+
     try:
         # Forward message to storage channel (for backup/viewing)
         forwarded_msg = await event.client.forward_messages(
@@ -2493,7 +2662,7 @@ async def handle_upload_file(event: events.NewMessage.Event) -> None:
             message
         )
         message_id = forwarded_msg.id if not isinstance(forwarded_msg, list) else forwarded_msg[0].id
-        
+
         # Add to session with full metadata
         session.add_file(
             message_id=message_id,
@@ -2503,7 +2672,7 @@ async def handle_upload_file(event: events.NewMessage.Event) -> None:
             access_hash=access_hash,
             file_reference=file_reference
         )
-        
+
         summary = session.get_summary()
         await event.client.send_message(
             event.sender_id,
@@ -2513,7 +2682,7 @@ async def handle_upload_file(event: events.NewMessage.Event) -> None:
             ),
             buttons=UPLOAD_SESSION_KEYBOARD,
         )
-        
+
     except Exception as e:
         LOGGER.error(f"Failed to store file: {e}")
         await event.client.send_message(
@@ -2532,7 +2701,7 @@ async def finalize_upload(
 
     upload_manager = get_upload_manager()
     session = upload_manager.get_session(event.sender_id)
-    
+
     if not session or not session.files:
         await event.client.send_message(
             event.sender_id,
@@ -2541,17 +2710,17 @@ async def finalize_upload(
         )
         reset_context(event.sender_id)
         raise events.StopPropagation
-    
+
     try:
         # Ensure user exists in database (important after DB recreation)
         await ensure_user_record(event.sender_id)
-        
+
         # Generate unique code and album_id for all files
         code = generate_random_text(15)
         album_id = generate_random_text(20) if len(session.files) > 1 else None
-        
+
         LOGGER.info(f"Saving {len(session.files)} files with code={code}, album_id={album_id}")
-        
+
         # Save all files to database with Telegram file identifiers
         for idx, file_data in enumerate(session.files):
             file_dict = {
@@ -2568,10 +2737,10 @@ async def finalize_upload(
                 "expires_at": expires_at,
                 "max_downloads": max_downloads,
             }
-            
+
             LOGGER.debug(f"File {idx}: type={file_dict['type']}, file_id={file_dict['file_id']}, "
                         f"size={file_dict['size']}, code={file_dict['code']}")
-            
+
             try:
                 await create_file_from_db(file_dict)
                 LOGGER.info(f"✅ File {idx} saved successfully")
@@ -2579,10 +2748,10 @@ async def finalize_upload(
                 LOGGER.error(f"❌ Failed to save file {idx}: {e}")
                 LOGGER.error(f"File data: {file_dict}")
                 raise
-        
+
         # Get summary
         summary = session.get_summary()
-        
+
         # Send summary to user
         await event.client.send_message(
             event.sender_id,
@@ -2598,11 +2767,11 @@ async def finalize_upload(
             ),
             buttons=START_KEYBOARD,
         )
-        
+
         # Clear session
         upload_manager.clear_session(event.sender_id)
         reset_context(event.sender_id)
-        
+
     except Exception as e:
         LOGGER.error(f"Failed to finish upload: {e}")
         await event.client.send_message(
@@ -2612,7 +2781,7 @@ async def finalize_upload(
         )
         upload_manager.clear_session(event.sender_id)
         reset_context(event.sender_id)
-    
+
     raise events.StopPropagation
 
 
@@ -2683,7 +2852,7 @@ async def handle_cancel_upload(event: events.NewMessage.Event) -> None:
 
     upload_manager = get_upload_manager()
     session = upload_manager.get_session(event.sender_id)
-    
+
     if not session or not session.files:
         await event.client.send_message(
             event.sender_id,
@@ -2692,24 +2861,24 @@ async def handle_cancel_upload(event: events.NewMessage.Event) -> None:
         )
         reset_context(event.sender_id)
         raise events.StopPropagation
-    
+
     try:
         file_count = len(session.files)
-        
+
         # Clear session only - files remain in storage channel but won't be saved to DB
         # Since no code was generated yet, there's no DB entry to delete
         LOGGER.info(f"Upload cancelled by user {event.sender_id}, clearing session with {file_count} files")
-        
+
         await event.client.send_message(
             event.sender_id,
             upload_cancelled_text.format(file_count),
             buttons=START_KEYBOARD,
         )
-        
+
         # Clear session
         upload_manager.clear_session(event.sender_id)
         reset_context(event.sender_id)
-        
+
     except Exception as e:
         LOGGER.error(f"Failed to cancel upload: {e}")
         await event.client.send_message(
@@ -2719,7 +2888,7 @@ async def handle_cancel_upload(event: events.NewMessage.Event) -> None:
         )
         upload_manager.clear_session(event.sender_id)
         reset_context(event.sender_id)
-    
+
     raise events.StopPropagation
 
 
@@ -2759,64 +2928,80 @@ async def main() -> None:
     from core.cache import get_cache
 
     global USER_LIST, BOT_USERNAME
-    
-    # Initialize database
-    await init_db()
-    
-    # Initialize Redis cache
+
     cache = get_cache()
-    cache_connected = await cache.connect()
-    
-    if cache_connected:
-        LOGGER.info("🚀 Cache warming started...")
-        
-        # Warm up user list cache
-        user_ids = list(await userid_list())
-        USER_LIST = user_ids
-        LOGGER.info(f"✅ Cached {len(user_ids)} users")
-        
-        # Warm up admin list cache
-        admin_users = await read_users(is_admin=True)
-        admin_ids = [u.userid for u in admin_users]
-        await cache.set_admin_list(admin_ids)
-        LOGGER.info(f"✅ Cached {len(admin_ids)} admins")
-    else:
-        # Fallback without cache
-        USER_LIST = list(await userid_list())
-        LOGGER.warning("⚠️ Running without Redis cache")
-    
-    # Start Telegram client
-    await CLIENT.start(bot_token=BOT_TOKEN)
-    me = await CLIENT.get_me()
-    BOT_USERNAME = (me.username or "").lstrip("@")
-    
-    # Warm up channel cache
-    LOGGER.info("🔄 Warming up channel cache...")
-    await refresh_channel_join_cache(CLIENT)
-    
-    if cache_connected:
-        # Verify channel cache was populated
-        cached_channels = await cache.get_channel_list()
-        if cached_channels:
-            LOGGER.info(f"✅ Cached {len(cached_channels)} channels in Redis")
-        else:
-            LOGGER.warning("⚠️ No channels found in cache after warming")
-        LOGGER.info("🎯 Cache warming completed!")
-    
-    # Start scheduler
-    SCHEDULER.add_job(cleanup_messages, "interval", seconds=30, args=[CLIENT])
-    SCHEDULER.start()
-    
     try:
+        # Initialize database
+        await init_db()
+
+        # Initialize Redis cache
+        cache = get_cache()
+        cache_connected = await cache.connect()
+
+        if cache_connected:
+            LOGGER.info("🚀 Cache warming started...")
+
+            # Warm up user list cache
+            user_ids = list(await userid_list())
+            USER_LIST = user_ids
+            LOGGER.info(f"✅ Cached {len(user_ids)} users")
+
+            # Warm up admin list cache
+            admin_users = await read_users(is_admin=True)
+            admin_ids = [u.userid for u in admin_users]
+            await cache.set_admin_list(admin_ids)
+            LOGGER.info(f"✅ Cached {len(admin_ids)} admins")
+        else:
+            # Fallback without cache
+            USER_LIST = list(await userid_list())
+            LOGGER.warning("⚠️ Running without Redis cache")
+
+        # Start Telegram client
+        USER_IDS.clear()
+        USER_IDS.update(USER_LIST)
+        await CLIENT.start(bot_token=BOT_TOKEN)
+        me = await CLIENT.get_me()
+        BOT_USERNAME = (me.username or "").lstrip("@")
+
+        # Warm up channel cache
+        LOGGER.info("🔄 Warming up channel cache...")
+        async with get_gate().operation():
+            await refresh_channel_join_cache(CLIENT)
+
+        if cache_connected:
+            # Verify channel cache was populated
+            cached_channels = await cache.get_channel_list()
+            if cached_channels:
+                LOGGER.info(f"✅ Cached {len(cached_channels)} channels in Redis")
+            else:
+                LOGGER.warning("⚠️ No channels found in cache after warming")
+            LOGGER.info("🎯 Cache warming completed!")
+
+        # Start scheduler
+        SCHEDULER.add_job(cleanup_messages, "interval", seconds=30, args=[CLIENT])
+        SCHEDULER.start()
+
         LOGGER.info(f"✅ Bot @{BOT_USERNAME} is running with Redis cache support!")
         await CLIENT.run_until_disconnected()
     finally:
-        SCHEDULER.shutdown()
-        await cache.close()
-        await close_db()
+        if SCHEDULER.running:
+            SCHEDULER.shutdown()
+        try:
+            await CLIENT.disconnect()
+        finally:
+            try:
+                await cache.close()
+            finally:
+                await close_db()
         LOGGER.info("Bot shut down gracefully")
 
 
+
 if __name__ == "__main__":
-    uvloop.install()
+    try:
+        import uvloop
+    except ImportError:
+        pass
+    else:
+        uvloop.install()
     asyncio.run(main())

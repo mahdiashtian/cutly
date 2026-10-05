@@ -9,10 +9,10 @@ T = TypeVar("T")
 
 class Container:
     """Simple dependency injection container.
-    
+
     This implements the Dependency Injection pattern to manage
     dependencies and make testing easier.
-    
+
     Examples:
         >>> container = Container()
         >>> container.register("db", lambda: Database())
@@ -31,12 +31,12 @@ class Container:
         singleton: bool = False
     ) -> None:
         """Register a service with its factory.
-        
+
         Args:
             name: Service identifier.
             factory: Factory function to create the service.
             singleton: If True, only one instance will be created.
-            
+
         Examples:
             >>> container = Container()
             >>> container.register("cache", SimpleCache, singleton=True)
@@ -47,38 +47,38 @@ class Container:
 
     def resolve(self, name: str) -> Any:
         """Resolve and return a service instance.
-        
+
         Args:
             name: Service identifier.
-            
+
         Returns:
             Service instance.
-            
+
         Raises:
             KeyError: If service is not registered.
-            
+
         Examples:
             >>> container = Container()
             >>> cache = container.resolve("cache")
         """
         if name not in self._services:
             raise KeyError(f"Service '{name}' not registered")
-        
+
         # Return cached singleton if exists
         if name in self._singletons:
             if self._singletons[name] is None:
                 self._singletons[name] = self._services[name]()
             return self._singletons[name]
-        
+
         # Create new instance
         return self._services[name]()
 
     def has(self, name: str) -> bool:
         """Check if a service is registered.
-        
+
         Args:
             name: Service identifier.
-            
+
         Returns:
             True if service is registered, False otherwise.
         """
@@ -96,10 +96,10 @@ _container = Container()
 
 def get_container() -> Container:
     """Get global dependency injection container.
-    
+
     Returns:
         Global Container instance.
-        
+
     Examples:
         >>> from app.container import get_container
         >>> container = get_container()
@@ -110,10 +110,10 @@ def get_container() -> Container:
 
 def setup_container() -> None:
     """Setup and configure the dependency injection container.
-    
+
     This function registers all services with the container.
     Should be called once during application startup.
-    
+
     Examples:
         >>> setup_container()
         >>> container = get_container()
@@ -121,14 +121,14 @@ def setup_container() -> None:
     """
     from services.file_repository import FileRepository
     from services.user_repository import UserRepository
-    from utils.cache import SimpleCache
-    
+    from core.cache import get_cache
+
     container = get_container()
-    
+
     # Register repositories as singletons
     container.register("user_repository", UserRepository, singleton=True)
     container.register("file_repository", FileRepository, singleton=True)
-    
+
     # Register cache as singleton
-    container.register("cache", lambda: SimpleCache(ttl=300), singleton=True)
+    container.register("cache", get_cache, singleton=True)
 

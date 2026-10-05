@@ -1,0 +1,71 @@
+{
+  "access_log": {
+    "counts": [
+      [
+        "album",
+        2
+      ]
+    ],
+    "total": 1,
+    "user": 42
+  },
+  "admins": [
+    42
+  ],
+  "album_delete": true,
+  "captions": [
+    "global\nlocal",
+    "global"
+  ],
+  "channels": [
+    [
+      "test",
+      "https://t.me/test"
+    ]
+  ],
+  "delivery": [
+    {
+      "captions": [
+        "global\nlocal\n👁 تعداد دانلود : 1\n❌ این پیام بعد از ۳۰ ثانیه حذف می شود\n\n@bot",
+        "global\nlocal\n👁 تعداد دانلود : 1\n❌ این پیام بعد از ۳۰ ثانیه حذف می شود\n\n@bot"
+      ],
+      "ids": [
+        8000000000001,
+        8000000000001
+      ]
+    }
+  ],
+  "files": [
+    [
+      "album",
+      1,
+      5000000001,
+      "00ff726566"
+    ],
+    [
+      "album_part1",
+      1,
+      5000000001,
+      "00ff726566"
+    ]
+  ],
+  "files_after_delete": 0,
+  "remove_channel": true,
+  "repeat_user": true,
+  "statistics": {
+    "broadcasts": 1,
+    "delivery_rate": 50.0,
+    "downloads": 2,
+    "files_today": 2,
+    "new_today": 2,
+    "total_files": 2,
+    "total_users": 2,
+    "views_today": 2,
+    "week_growth": 2
+  },
+  "users": [
+    42,
+    5000000001
+  ],
+  "wrong_owner_delete": false
+}

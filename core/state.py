@@ -35,4 +35,6 @@ class State(Enum):
     USER_ADMIN_USER_LOG = auto()
     USER_GLOBAL_CAPTION_PANEL = auto()
     USER_SET_GLOBAL_CAPTION = auto()
+    USER_RESTORE_UPLOAD = auto()
+    USER_RESTORE_CONFIRM = auto()
 
