@@ -1,12 +1,14 @@
 """SQLAlchemy analytics, access logs and broadcast reports."""
 
 from datetime import datetime, timedelta, timezone
-from sqlalchemy import func, select, update, case
+from sqlalchemy import func, select, update, case, true
 from core.cache import get_cache
+from core.maintenance import database_operation
 from core.database import session_scope
 from core.models import BroadcastJob, File, FileAccessLog, User
 
 
+@database_operation
 async def touch_user_activity(user_id: int) -> None:
     timestamp = datetime.now(timezone.utc)
     async with session_scope() as session:
@@ -73,58 +75,47 @@ async def get_dashboard_statistics() -> dict:
         now - timedelta(days=7),
         now - timedelta(days=14),
     )
-    async with session_scope() as session:
 
-        def conditional_count(condition):
-            return func.count(case((condition, 1)))
+    def conditional_count(condition):
+        return func.count(case((condition, 1)))
 
-        total_users, new_today, current_users, previous_users = (
-            await session.execute(
-                select(
-                    func.count(User.id),
-                    conditional_count(User.created_at >= today),
-                    conditional_count(User.created_at >= recent_week),
-                    conditional_count(
-                        (User.created_at >= previous_week)
-                        & (User.created_at < recent_week)
-                    ),
-                )
-            )
-        ).one()
-        total_files, files_today, downloads = (
-            await session.execute(
-                select(
-                    func.count(File.id),
-                    conditional_count(File.created_at >= today),
-                    func.coalesce(func.sum(File.count), 0),
-                )
-            )
-        ).one()
-        views_today = await session.scalar(
-            select(func.count(FileAccessLog.id)).where(
-                FileAccessLog.accessed_at >= today
-            )
+    users = select(
+        func.count(User.id).label("total_users"),
+        conditional_count(User.created_at >= today).label("new_today"),
+        conditional_count(User.created_at >= recent_week).label("current_users"),
+        conditional_count(
+            (User.created_at >= previous_week) & (User.created_at < recent_week)
+        ).label("previous_users"),
+    ).subquery("user_stats")
+    files = select(
+        func.count(File.id).label("total_files"),
+        conditional_count(File.created_at >= today).label("files_today"),
+        func.coalesce(func.sum(File.count), 0).label("downloads"),
+    ).subquery("file_stats")
+    broadcasts = (
+        select(
+            func.count(BroadcastJob.id).label("broadcasts"),
+            func.coalesce(func.sum(BroadcastJob.success_count), 0).label("delivered"),
+            func.coalesce(func.sum(BroadcastJob.total_count), 0).label("attempted"),
         )
-        broadcasts, delivered, attempted = (
-            await session.execute(
-                select(
-                    func.count(BroadcastJob.id),
-                    func.coalesce(func.sum(BroadcastJob.success_count), 0),
-                    func.coalesce(func.sum(BroadcastJob.total_count), 0),
-                ).where(BroadcastJob.status == "completed")
-            )
-        ).one()
-    return {
-        "total_users": total_users,
-        "new_today": new_today,
-        "week_growth": current_users - previous_users,
-        "total_files": total_files,
-        "files_today": files_today,
-        "downloads": downloads,
-        "views_today": views_today,
-        "broadcasts": broadcasts,
-        "delivery_rate": delivered / attempted * 100 if attempted else 0.0,
-    }
+        .where(BroadcastJob.status == "completed")
+        .subquery("broadcast_stats")
+    )
+    views = (
+        select(func.count(FileAccessLog.id))
+        .where(FileAccessLog.accessed_at >= today)
+        .scalar_subquery()
+    )
+    # One SQL statement gives one MVCC snapshot and avoids four network trips.
+    stmt = select(users, files, broadcasts, views.label("views_today")).select_from(
+        users.join(files, true()).join(broadcasts, true())
+    )
+    async with session_scope() as session:
+        result = dict((await session.execute(stmt)).mappings().one())
+    result["week_growth"] = result.pop("current_users") - result.pop("previous_users")
+    attempted, delivered = result.pop("attempted"), result.pop("delivered")
+    result["delivery_rate"] = delivered / attempted * 100 if attempted else 0.0
+    return result
 
 
 async def create_broadcast_job(

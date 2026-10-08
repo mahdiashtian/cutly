@@ -2,6 +2,8 @@
 
 import asyncio
 from contextlib import asynccontextmanager
+from functools import wraps
+from core.concurrency import KeyedLocks
 
 
 class OperationGate:
@@ -11,7 +13,7 @@ class OperationGate:
         self.writers_waiting = 0
         self.restoring = False
         self.generation = 0
-        self.download_lock = asyncio.Lock()
+        self.download_lock = KeyedLocks()
         self.downloads = {}
 
     @asynccontextmanager
@@ -67,3 +69,14 @@ def get_gate():
         _gates.clear()
         _gates[loop] = OperationGate()
     return _gates[loop]
+
+
+def database_operation(function):
+    """Keep cache reads/writes in the same restore lease as their SQL work."""
+
+    @wraps(function)
+    async def guarded(*args, **kwargs):
+        async with get_gate().operation():
+            return await function(*args, **kwargs)
+
+    return guarded

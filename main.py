@@ -40,9 +40,11 @@ from telethon.utils import pack_bot_file_id
 
 from core.database import close_db, init_db
 from core.maintenance import get_gate
+from core.concurrency import bounded_map
+from services.channel import channel_revision
 from services.backup import create_data_backup, backup_directory
 from services.restore import PreparedRestore, RestoreError, prepare_restore, apply_restore
-from services.file import read_album_files, save_file_fields
+from services.file import read_album_files, save_file_fields, create_files_from_db
 from app.factory import get_bot_factory
 from core.models import File, User
 from core.state import State
@@ -161,6 +163,9 @@ LIST_VIDEO: List[Dict[str, int]] = []
 USER_LIST: List[int] = []
 USER_IDS: set[int] = set()
 CHANNEL_JOIN_LIST: Optional[Dict[str, Dict[str, str]]] = None
+CHANNEL_JOIN_REVISION = channel_revision()
+CHANNEL_JOIN_VERSION = None
+CHANNEL_JOIN_BUILT_AT = 0.0
 BOT_USERNAME: str = ""
 SCHEDULER = get_bot_factory().create_scheduler()
 ADMIN_PREDICATE = admin_filter(ADMIN_MASTER)
@@ -291,13 +296,16 @@ def format_file_size(size_bytes: int) -> str:
 def set_state(user_id: int, state: Optional[State]) -> None:
     """Persist the current conversation state."""
 
-    CONVERSATION_STATE[user_id] = state
+    if state is None:
+        CONVERSATION_STATE.pop(user_id, None)
+    else:
+        CONVERSATION_STATE[user_id] = state
 
 
 def reset_context(user_id: int) -> None:
     """Clear cached conversation context for a user."""
 
-    CONVERSATION_OBJECT[user_id] = None
+    CONVERSATION_OBJECT.pop(user_id, None)
     set_state(user_id, None)
 
 
@@ -345,6 +353,16 @@ async def send_global_caption_menu(client: TelegramClient, user_id: int, first_n
 
 
 async def build_channel_join_list(client: TelegramClient) -> Dict[str, Dict[str, str]]:
+    from core.cache import get_cache
+    cache = get_cache()
+    cached = await cache.get_channel_list()
+    if cached is not None:
+        return cached
+    async with cache.fill_lock("channels"):
+        return await _build_channel_join_list(client)
+
+
+async def _build_channel_join_list(client: TelegramClient, attempts=3) -> Dict[str, Dict[str, str]]:
     """Build a cache of mandatory join channels with Redis caching.
 
     Checks Redis cache first for fast access. Falls back to building from
@@ -381,15 +399,12 @@ async def build_channel_join_list(client: TelegramClient) -> Dict[str, Dict[str,
             entity = await client.get_entity(entity_id)
             if getattr(entity, "title", None):
                 title = entity.title  # type: ignore[assignment]
-        except (ValueError, ChannelInvalidError, ChannelPrivateError) as exc:
+        except Exception as exc:
             LOGGER.warning("Unable to resolve channel %s: %s", channel.channel_id, exc)
         return channel.channel_id, title, channel.channel_link
 
     # Fetch all channel info concurrently with Telethon's built-in caching
-    results = await asyncio.gather(
-        *[fetch_channel_info(ch) for ch in channels],
-        return_exceptions=True,
-    )
+    results = await bounded_map(fetch_channel_info, channels)
 
     for result in results:
         if isinstance(result, Exception):
@@ -400,7 +415,9 @@ async def build_channel_join_list(client: TelegramClient) -> Dict[str, Dict[str,
     # Update Redis cache for next time
     cache_updated = await cache.set_channel_list(payload, version=version)
     if version is not None and await cache.version("channels") != version:
-        return await build_channel_join_list(client)
+        if attempts <= 1:
+            raise RuntimeError("Channel configuration changed repeatedly during hydration")
+        return await _build_channel_join_list(client, attempts - 1)
     if cache_updated:
         LOGGER.info(f"✅ Channel list cached in Redis ({len(payload)} channels)")
 
@@ -412,8 +429,21 @@ async def refresh_channel_join_cache(client: TelegramClient) -> None:
 
     LOGGER.info("🔄 Refreshing channel join cache...")
 
-    global CHANNEL_JOIN_LIST
-    CHANNEL_JOIN_LIST = await build_channel_join_list(client)
+    global CHANNEL_JOIN_LIST, CHANNEL_JOIN_REVISION, CHANNEL_JOIN_VERSION, CHANNEL_JOIN_BUILT_AT
+    from core.cache import get_cache
+    cache = get_cache()
+    for _ in range(3):
+        revision = channel_revision()
+        version = await cache.version("channels")
+        payload = await build_channel_join_list(client)
+        if revision == channel_revision() and version == await cache.version("channels"):
+            CHANNEL_JOIN_LIST = payload
+            CHANNEL_JOIN_REVISION = revision
+            CHANNEL_JOIN_VERSION = version
+            CHANNEL_JOIN_BUILT_AT = time.monotonic()
+            break
+    else:
+        raise RuntimeError("Channel configuration changed repeatedly during refresh")
 
     LOGGER.info(f"✅ Channel join cache refreshed ({len(CHANNEL_JOIN_LIST)} channels)")
 
@@ -422,8 +452,12 @@ async def ensure_channel_join_list(client: TelegramClient) -> Dict[str, Dict[str
     """Return a cached join list and hydrate it on first access."""
 
     global CHANNEL_JOIN_LIST
-    if CHANNEL_JOIN_LIST is None:
-        CHANNEL_JOIN_LIST = await build_channel_join_list(client)
+    from core.cache import get_cache
+    changed = CHANNEL_JOIN_REVISION != channel_revision()
+    if CHANNEL_JOIN_VERSION is not None:
+        changed = changed or await get_cache().version("channels") != CHANNEL_JOIN_VERSION
+    if CHANNEL_JOIN_LIST is None or changed or time.monotonic() - CHANNEL_JOIN_BUILT_AT >= 30:
+        await refresh_channel_join_cache(client)
     return CHANNEL_JOIN_LIST
 
 
@@ -553,7 +587,7 @@ async def cleanup_messages(client: TelegramClient) -> None:
             LOGGER.debug("Unable to delete message %s: %s", record, exc)
 
     # Delete all messages concurrently
-    await asyncio.gather(*[delete_single(record) for record in pending], return_exceptions=True)
+    await bounded_map(delete_single, pending, concurrency=10)
 
 
 def parse_channel_payload(text: str) -> Tuple[str, str]:
@@ -1806,38 +1840,25 @@ async def get_broadcast_audience(
     client: TelegramClient, audience: str, channel_id: Optional[str] = None
 ) -> List[User]:
     """Resolve an audience just before previewing a broadcast."""
-    users = await read_users()
     now = datetime.now(timezone.utc)
-
-    def as_utc(value: datetime) -> datetime:
-        return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
-
     if audience == "🆕 کاربران جدید":
-        return [user for user in users if as_utc(user.created_at) >= now - timedelta(days=7)]
+        return await read_users(created_after=now - timedelta(days=7))
     if audience == "🟢 کاربران فعال":
-        return [
-            user for user in users
-            if user.last_activity_at and as_utc(user.last_activity_at) >= now - timedelta(days=30)
-        ]
+        return await read_users(active_after=now - timedelta(days=30))
     if audience == "⚪ کاربران غیرفعال":
-        return [
-            user for user in users
-            if not user.last_activity_at or as_utc(user.last_activity_at) < now - timedelta(days=30)
-        ]
+        return await read_users(inactive_before=now - timedelta(days=30))
+    users = await read_users()
     if audience != "📢 اعضای کانال" or not channel_id:
         return users
 
-    semaphore = asyncio.Semaphore(5)
-
     async def is_member(user: User) -> Optional[User]:
-        async with semaphore:
-            try:
-                await client.get_permissions(channel_id, user.userid)
-                return user
-            except Exception:
-                return None
+        try:
+            await client.get_permissions(channel_id, user.userid)
+            return user
+        except Exception:
+            return None
 
-    results = await asyncio.gather(*(is_member(user) for user in users))
+    results = await bounded_map(is_member, users)
     return [user for user in results if user is not None]
 
 
@@ -2722,6 +2743,7 @@ async def finalize_upload(
         LOGGER.info(f"Saving {len(session.files)} files with code={code}, album_id={album_id}")
 
         # Save all files to database with Telegram file identifiers
+        pending_files = []
         for idx, file_data in enumerate(session.files):
             file_dict = {
                 "type": file_data.media_type,
@@ -2741,13 +2763,9 @@ async def finalize_upload(
             LOGGER.debug(f"File {idx}: type={file_dict['type']}, file_id={file_dict['file_id']}, "
                         f"size={file_dict['size']}, code={file_dict['code']}")
 
-            try:
-                await create_file_from_db(file_dict)
-                LOGGER.info(f"✅ File {idx} saved successfully")
-            except Exception as e:
-                LOGGER.error(f"❌ Failed to save file {idx}: {e}")
-                LOGGER.error(f"File data: {file_dict}")
-                raise
+            pending_files.append(file_dict)
+        await create_files_from_db(pending_files)
+        LOGGER.info("Committed %s upload files", len(pending_files))
 
         # Get summary
         summary = session.get_summary()
@@ -2979,6 +2997,7 @@ async def main() -> None:
 
         # Start scheduler
         SCHEDULER.add_job(cleanup_messages, "interval", seconds=30, args=[CLIENT])
+        SCHEDULER.add_job(cache.recover, "interval", seconds=30)
         SCHEDULER.start()
 
         LOGGER.info(f"✅ Bot @{BOT_USERNAME} is running with Redis cache support!")

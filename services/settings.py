@@ -4,26 +4,37 @@ from sqlalchemy.exc import IntegrityError
 from core.database import session_scope
 from core.models import BotSettings
 from core.cache import get_cache
+from core.maintenance import database_operation
 
 
+@database_operation
 async def get_bot_settings() -> BotSettings:
     cache = get_cache()
     data, version = await cache.get_snapshot("settings", "1")
     if data is not None:
         return BotSettings(**data)
+    async with cache.fill_lock("settings"):
+        data, version = await cache.get_snapshot("settings", "1")
+        if data is not None:
+            return BotSettings(**data)
+        settings = await _load_settings()
+        await cache.set_snapshot(
+            "settings",
+            "1",
+            {
+                "id": settings.id,
+                "global_caption": settings.global_caption,
+                "show_file_captions": settings.show_file_captions,
+            },
+            version,
+        )
+        return settings
+
+
+async def _load_settings():
     async with session_scope() as session:
         settings = await session.get(BotSettings, 1)
         if settings is not None:
-            await cache.set_snapshot(
-                "settings",
-                "1",
-                {
-                    "id": 1,
-                    "global_caption": settings.global_caption,
-                    "show_file_captions": settings.show_file_captions,
-                },
-                version,
-            )
             return settings
     try:
         async with session_scope() as session:
@@ -39,6 +50,7 @@ async def get_bot_settings() -> BotSettings:
             return settings
 
 
+@database_operation
 async def _update(**values) -> BotSettings:
     await get_bot_settings()
     async with session_scope() as session:

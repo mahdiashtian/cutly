@@ -23,7 +23,7 @@ async def test_start_creates_user_and_menu(app, event_factory, telegram):
     await stopped(app.handle_start, event)
     user = await read_user_from_db(event.sender_id)
     assert user and user.last_activity_at
-    assert app.CONVERSATION_STATE[event.sender_id] is None
+    assert app.CONVERSATION_STATE.get(event.sender_id) is None
     assert telegram.send_message.call_args.kwargs["buttons"] == app.START_KEYBOARD
 
 
@@ -55,7 +55,7 @@ async def test_password_download_owner_bypass_and_cleanup(
     assert not telegram.send_file.called
     await stopped(app.handle_passworded_file, event_factory("secret", user_id=42))
     assert (await read_file_from_db(file.code)).count == 1
-    assert app.CONVERSATION_STATE[42] is None
+    assert app.CONVERSATION_STATE.get(42) is None
     assert app.LIST_VIDEO == [{"chat_id": 100, "message_id": 10}]
     own_event = event_factory("/start get_abc123", pattern_match=outsider.pattern_match)
     await app.handle_get_file(own_event)

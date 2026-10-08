@@ -13,6 +13,7 @@ from pathlib import Path
 from core.database import database_url
 from core.database import get_engine
 from core.maintenance import get_gate
+from core.concurrency import run_blocking
 from core.models import Base
 from core.serialization import encode_row
 from decouple import config
@@ -56,7 +57,7 @@ async def export_data(connection, path: Path) -> None:
                 )
                 digest.update(chunk.encode("utf-8"))
                 counts[table.name] += len(rows)
-                await asyncio.to_thread(output.write, chunk)
+                await run_blocking(output.write, chunk)
         output.write(
             json.dumps({"end": True, "counts": counts, "sha256": digest.hexdigest()})
             + "\n"

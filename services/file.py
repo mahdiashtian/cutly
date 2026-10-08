@@ -6,13 +6,13 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from sqlalchemy import select
 from core.database import session_scope
-from core.maintenance import get_gate
+from core.maintenance import get_gate, database_operation
 
 from core.models import File
 from core.cache import get_cache
 from core.serialization import encode_row, decode_row
 from services.user import read_user_from_db
-from services.file_repository import FileRepository
+from services.file_repository import FileRepository, SQL_BATCH_SIZE
 
 _repo = FileRepository()
 
@@ -39,6 +39,11 @@ async def create_file_from_db(data: Dict[str, Any]) -> File:
     """
 
     return await _repo.create(data)
+
+
+async def create_files_from_db(data: List[Dict[str, Any]]) -> List[File]:
+    """Commit an entire upload atomically; no partial album on failure."""
+    return await _repo.create_many(data)
 
 
 async def delete_file_from_db(userid: int, code: str) -> bool:
@@ -102,6 +107,7 @@ async def read_files_from_db(
     return await _repo.list(*conditions)
 
 
+@database_operation
 async def read_file_from_db(code: str, userid: Optional[int] = None) -> Optional[File]:
     """Fetch a single file record by code and optional owner.
 
@@ -129,17 +135,29 @@ async def read_file_from_db(code: str, userid: Optional[int] = None) -> Optional
             return None
         file.owner = await read_user_from_db(file.owner_id)
         return file
-    file = await _repo.get_by_code(code, owner_id=userid)
-    if file is not None:
-        row = {
-            column.name: getattr(file, column.name)
-            for column in File.__table__.columns
-            if column.name != "count"
-        }
-        await cache.set_snapshot(scope, "metadata", encode_row(row), version)
-    return file
+    async with cache.fill_lock(scope):
+        data, version = await cache.get_snapshot(scope, "metadata")
+        if data is not None:
+            counts = await _repo.counts_by_code([code])
+            if code not in counts:
+                return None
+            file = File(**decode_row(File.__table__, data), count=counts[code])
+            if userid is not None and file.owner_id != userid:
+                return None
+            file.owner = await read_user_from_db(file.owner_id)
+            return file
+        file = await _repo.get_by_code(code, owner_id=userid)
+        if file is not None:
+            row = {
+                column.name: getattr(file, column.name)
+                for column in File.__table__.columns
+                if column.name != "count"
+            }
+            await cache.set_snapshot(scope, "metadata", encode_row(row), version)
+        return file
 
 
+@database_operation
 async def read_album_files(album_id: str) -> List[File]:
     cache = get_cache()
     scope = f"album:{album_id}"
@@ -151,21 +169,30 @@ async def read_album_files(album_id: str) -> List[File]:
             for row in data
             if row["code"] in counts
         ]
-    files = await _repo.list(
-        File.album_id == album_id, order_by=(File.album_order, File.id)
-    )
-    rows = [
-        encode_row(
-            {
-                column.name: getattr(file, column.name)
-                for column in File.__table__.columns
-                if column.name != "count"
-            }
+    async with cache.fill_lock(scope):
+        data, version = await cache.get_snapshot(scope, "members")
+        if data is not None:
+            counts = await _repo.counts_by_code([row["code"] for row in data])
+            return [
+                File(**decode_row(File.__table__, row), count=counts[row["code"]])
+                for row in data
+                if row["code"] in counts
+            ]
+        files = await _repo.list(
+            File.album_id == album_id, order_by=(File.album_order, File.id)
         )
-        for file in files
-    ]
-    await cache.set_snapshot(scope, "members", rows, version)
-    return files
+        rows = [
+            encode_row(
+                {
+                    column.name: getattr(file, column.name)
+                    for column in File.__table__.columns
+                    if column.name != "count"
+                }
+            )
+            for file in files
+        ]
+        await cache.set_snapshot(scope, "members", rows, version)
+        return files
 
 
 async def save_file_fields(file: File, *fields: str) -> None:
@@ -183,22 +210,23 @@ class DownloadLimitError(ValueError):
 
 async def reserve_file_downloads(files: List[File]) -> dict[str, int]:
     """Reserve slots atomically, including concurrent requests for one link."""
-    codes = {file.code for file in files}
+    codes = sorted({file.code for file in files})
     if not codes:
         raise DownloadLimitError("No media in album")
     gate = get_gate()
-    async with gate.download_lock:
+    async with gate.download_lock.hold(codes):
         async with session_scope() as session:
-            rows = (
-                await session.execute(
+            rows = []
+            for start in range(0, len(codes), SQL_BATCH_SIZE):
+                result = await session.execute(
                     select(
                         File.code,
                         File.count,
                         File.max_downloads,
                         File.expires_at,
-                    ).where(File.code.in_(codes))
+                    ).where(File.code.in_(codes[start : start + SQL_BATCH_SIZE]))
                 )
-            ).all()
+                rows.extend(result.all())
         now = datetime.now(timezone.utc)
         if len(rows) != len(codes) or any(
             (row.expires_at is not None and row.expires_at <= now)
@@ -217,17 +245,26 @@ async def reserve_file_downloads(files: List[File]) -> dict[str, int]:
 
 async def finish_file_downloads(files: List[File], *, success: bool) -> None:
     gate = get_gate()
-    async with gate.download_lock:
-        try:
-            if success:
-                await _repo.increment_files(files)
-        finally:
-            for code in {file.code for file in files}:
-                remaining = gate.downloads.get(code, 0) - 1
-                if remaining > 0:
-                    gate.downloads[code] = remaining
-                else:
-                    gate.downloads.pop(code, None)
+    if not success:
+        # A failed send has no SQL write. This synchronous release cannot be
+        # cancelled again while waiting for an unrelated reservation query.
+        _release_downloads(gate, files)
+        return
+    try:
+        async with gate.download_lock.hold(file.code for file in files):
+            await _repo.increment_files(files)
+    finally:
+        # Acquisition can itself be cancelled; always release our pending slot.
+        _release_downloads(gate, files)
+
+
+def _release_downloads(gate, files):
+    for code in {file.code for file in files}:
+        remaining = gate.downloads.get(code, 0) - 1
+        if remaining > 0:
+            gate.downloads[code] = remaining
+        else:
+            gate.downloads.pop(code, None)
 
 
 def file_access_error(file: File) -> Optional[str]:

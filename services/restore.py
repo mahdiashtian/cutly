@@ -8,6 +8,9 @@ Unknown data/columns and unsupported literals fail before any database change.
 from __future__ import annotations
 
 import asyncio
+import io
+import threading
+from core.concurrency import run_blocking
 import base64
 import gzip
 import hashlib
@@ -255,8 +258,9 @@ def _normalize(table_name, row):
 
 
 class _BoundedReader:
-    def __init__(self, stream):
+    def __init__(self, stream, stop=None):
         self.stream = stream
+        self.stop = stop
         self.total = 0
         self.limit = config("RESTORE_MAX_BYTES", default=2 * 1024**3, cast=int)
 
@@ -264,6 +268,8 @@ class _BoundedReader:
         return self
 
     def __next__(self):
+        if self.stop is not None and self.stop.is_set():
+            raise RestoreError("بازیابی لغو شد.")
         line = self.stream.readline(16 * 1024**2 + 1)
         if not line:
             raise StopIteration
@@ -273,9 +279,37 @@ class _BoundedReader:
         return line
 
 
-def _parse(path: Path, spool: Path, source_format: str) -> PreparedRestore:
+class _SQLBuffer:
+    """Linear-memory statement accumulation; no per-line rescanning."""
+    def __init__(self):
+        self.clear()
+
+    def clear(self):
+        self.buffer = io.StringIO()
+        self.size = 0
+        self.nonspace = False
+        self.last = ""
+
+    def __bool__(self):
+        return bool(self.size)
+
+    def append(self, value):
+        self.size += len(value)
+        if self.size > 32 * 1024**2:
+            raise RestoreError("یک دستور SQL بیش از حد بزرگ است؛ از COPY استفاده کنید.")
+        self.buffer.write(value)
+        self.nonspace = self.nonspace or bool(value.strip())
+        self.last = value[-1:] or self.last
+
+    def value(self):
+        return self.buffer.getvalue()
+
+
+def _parse(path: Path, spool: Path, source_format: str, stop=None) -> PreparedRestore:
     counts, version, tables_seen = Counter(), None, set()
     db = sqlite3.connect(spool)
+    if stop is not None:
+        db.set_progress_handler(lambda: int(stop.is_set()), 10000)
     db.execute("CREATE TABLE rows (table_name TEXT, payload TEXT)")
     db.execute("CREATE INDEX ix_rows_table ON rows(table_name)")
     db.execute(
@@ -330,7 +364,7 @@ def _parse(path: Path, spool: Path, source_format: str) -> PreparedRestore:
             compressed = raw.read(2) == b"\x1f\x8b"
         opener = gzip.open if compressed else open
         with opener(path, "rt", encoding="utf-8-sig", newline="") as stream:
-            lines = _BoundedReader(stream)
+            lines = _BoundedReader(stream, stop)
             first = next(lines, "")
             if first.lstrip().startswith("{"):
                 header = json.loads(first)
@@ -362,7 +396,7 @@ def _parse(path: Path, spool: Path, source_format: str) -> PreparedRestore:
                 if header["version"] == 2 and not finished:
                     raise RestoreError("بک‌آپ داده ناقص است.")
             else:
-                statement, quoted, dollar, block_comment = [], False, None, False
+                statement, quoted, dollar, block_comment = _SQLBuffer(), False, None, False
                 escaped_string, standard_strings = False, True
                 postgres_dump, dump_complete = False, False
                 create_columns = {}
@@ -445,14 +479,14 @@ def _parse(path: Path, spool: Path, source_format: str) -> PreparedRestore:
                                 continue
                             if not quoted:
                                 escaped_string = not standard_strings or bool(
-                                    statement and statement[-1].upper() == "E"
+                                    statement and statement.last.upper() == "E"
                                 )
                             quoted = not quoted
                         statement.append(char)
                         i += 1
                         if char != ";" or quoted:
                             continue
-                        sql = "".join(statement).strip()
+                        sql = statement.value().strip()
                         statement.clear()
                         if re.match(
                             r'^(?:ALTER TABLE(?: ONLY)?\s+(?:public\.)?"?file"?|CREATE TABLE\s+(?:public\.)?"?file"?)\b',
@@ -520,18 +554,14 @@ def _parse(path: Path, spool: Path, source_format: str) -> PreparedRestore:
                             raise RestoreError(
                                 "دستور SQL ناشناخته در فایل بک‌آپ وجود دارد."
                             )
-                    if not quoted and statement and not "".join(statement).strip():
+                    if not quoted and statement and not statement.nonspace:
                         statement.clear()
-                    if sum(map(len, statement)) > 32 * 1024**2:
-                        raise RestoreError(
-                            "یک دستور SQL بیش از حد بزرگ است؛ از COPY استفاده کنید."
-                        )
                 if (
                     copy_target
                     or quoted
                     or dollar
                     or block_comment
-                    or "".join(statement).strip()
+                    or statement.nonspace
                 ):
                     raise RestoreError("بک‌آپ ناقص یا بریده شده است.")
                 if postgres_dump and not dump_complete:
@@ -610,6 +640,7 @@ async def prepare_restore(path: str | Path) -> PreparedRestore:
     spool = Path(spool_path)
     normalized = None
     expanded = None
+    stop = threading.Event()
     try:
         if path.stat().st_size > config(
             "RESTORE_MAX_BYTES", default=2 * 1024**3, cast=int
@@ -627,6 +658,8 @@ async def prepare_restore(path: str | Path) -> PreparedRestore:
                     total = 0
                     with gzip.open(path, "rb") as source, expanded.open("wb") as output:
                         while chunk := source.read(1024 * 1024):
+                            if stop.is_set():
+                                raise RestoreError("بازیابی لغو شد.")
                             total += len(chunk)
                             if total > config(
                                 "RESTORE_MAX_BYTES", default=2 * 1024**3, cast=int
@@ -636,7 +669,7 @@ async def prepare_restore(path: str | Path) -> PreparedRestore:
                                 )
                             output.write(chunk)
 
-                await asyncio.to_thread(expand)
+                await run_blocking(expand, on_cancel=stop.set)
                 path = expanded
         source_format = "sql"
         if signature.startswith(b"PGDMP") or signature[257:262] == b"ustar":
@@ -663,7 +696,7 @@ async def prepare_restore(path: str | Path) -> PreparedRestore:
                             "RESTORE_MAX_BYTES", default=2 * 1024**3, cast=int
                         ):
                             raise RestoreError("حجم SQL آرشیو بیش از حد مجاز است.")
-                        await asyncio.to_thread(output.write, chunk)
+                        await run_blocking(output.write, chunk)
                 await process.wait()
                 return await error_task
 
@@ -687,7 +720,7 @@ async def prepare_restore(path: str | Path) -> PreparedRestore:
                     "آرشیو قابل خواندن نیست؛ pg_restore هم‌نسخه یا جدیدتر از pg_dump را نصب کنید."
                 )
             path = normalized
-        return await asyncio.to_thread(_parse, path, spool, source_format)
+        return await run_blocking(_parse, path, spool, source_format, stop, on_cancel=stop.set)
     except BaseException:
         spool.unlink(missing_ok=True)
         raise
@@ -702,7 +735,7 @@ async def apply_restore(
     prepared: PreparedRestore, *, on_restored=None, expected_generation=None
 ) -> RestoreResult:
     """Replace all application rows atomically, keeping current Alembic schema."""
-    if await asyncio.to_thread(_digest, prepared.spool) != prepared.digest:
+    if await run_blocking(_digest, prepared.spool) != prepared.digest:
         raise RestoreError("فایل آمادهٔ بازیابی پس از پیش‌نمایش تغییر کرده است.")
     safety = (
         backup_directory()
@@ -780,8 +813,14 @@ async def apply_restore(
                 finally:
                     db.close()
         cache = get_cache()
+        cancellation = None
         try:
             await cache.reset_after_restore()
+        except asyncio.CancelledError as error:
+            # The SQL transaction is already committed. Never leave its old
+            # Redis namespace enabled if the caller cancels during cleanup.
+            cache.require_reset()
+            cancellation = error
         except Exception:
             cache.enabled = False
             LOGGER.exception("Restore committed; Redis reset failed")
@@ -790,6 +829,8 @@ async def apply_restore(
                 await on_restored()
             except Exception:
                 LOGGER.exception("Restore committed; runtime cleanup failed")
+        if cancellation is not None:
+            raise cancellation
     # Refresh planner statistics after bulk loading. Failure must not be reported
     # as a failed transaction after data has already committed.
     try:

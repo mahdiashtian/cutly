@@ -49,9 +49,11 @@ docs/         feature inventory and migration guide
 main.py       event handlers and application lifecycle
 ```
 
-Each database operation receives its own async session. Conversation updates write only changed fields, and counters use atomic SQL updates. Redis keeps the existing cache keys and invalidation behavior.
+Each database operation receives its own async session. Conversation updates write only changed fields, albums commit together, and counters use atomic SQL updates. Redis uses an atomic user ID index, targeted profile invalidation, and expiring versioned snapshots. Existing JSON user lists migrate on their next insertion.
 
 File and album metadata and settings use versioned Redis snapshots. Download counts remain authoritative in SQL; concurrent requests reserve download slots atomically. Expired Telegram file references are refreshed from the storage channel. See [backup and recovery](docs/backup-restore.md) for supported formats, version compatibility, and operational limits.
+
+Cold reads share a loader per key, background work uses bounded worker counts, and connection pools are configurable. See [performance and cache design](docs/performance.md) and the [verification record](docs/verification.md) for concurrency limits and measured test results.
 
 ## Development
 

@@ -137,6 +137,8 @@ async def _send_reserved_file(
 ) -> List[Message]:
     records = await read_album_files(file.album_id) if file.album_id else [file]
     try:
+        if not any(record.code == file.code for record in records):
+            raise DownloadLimitError("Original album member was deleted or moved")
         counts = await reserve_file_downloads(records)
     except DownloadLimitError:
         await client.send_message(chat_id, "🚫 لینک منقضی شده یا سقف دانلود آن پر شده است.", buttons=keyboard)

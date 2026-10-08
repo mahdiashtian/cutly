@@ -33,6 +33,7 @@ from services.file import create_file_from_db
 @pytest_asyncio.fixture(autouse=True)
 async def isolated_db(tmp_path, monkeypatch):
     await close_db()
+    monkeypatch.setenv("BACKUP_DIR", str(tmp_path / "backup"))
     monkeypatch.setenv(
         "DB_URL", "sqlite+aiosqlite:///" + (tmp_path / "test.sqlite3").as_posix()
     )
@@ -104,6 +105,9 @@ def app(monkeypatch, telegram):
     for user_id in list(main.RESTORE_DRAFTS):
         main.clear_restore_draft(user_id)
     main.CHANNEL_JOIN_LIST = {}
+    main.CHANNEL_JOIN_REVISION = main.channel_revision()
+    main.CHANNEL_JOIN_VERSION = None
+    main.CHANNEL_JOIN_BUILT_AT = main.time.monotonic()
     main.BOT_USERNAME = "cutly_bot"
     main.BROADCAST_IN_PROGRESS = False
     main.BROADCAST_CANCEL_EVENT = None

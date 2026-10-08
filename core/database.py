@@ -44,14 +44,25 @@ def database_url() -> URL:
 
 
 def create_engine(url: str | URL) -> AsyncEngine:
-    engine = create_async_engine(url, pool_pre_ping=True)
+    options = {"pool_pre_ping": True}
+    if make_url(url).get_backend_name() in ("postgres", "postgresql"):
+        options.update(
+            pool_size=config("DB_POOL_SIZE", default=10, cast=int),
+            max_overflow=config("DB_MAX_OVERFLOW", default=20, cast=int),
+            pool_timeout=config("DB_POOL_TIMEOUT", default=30, cast=float),
+            pool_recycle=config("DB_POOL_RECYCLE", default=1800, cast=int),
+            pool_use_lifo=True,
+        )
+    engine = create_async_engine(url, **options)
     if engine.dialect.name == "sqlite":
 
         @event.listens_for(engine.sync_engine, "connect")
         def configure_sqlite(connection, record):
             cursor = connection.cursor()
-            cursor.execute("PRAGMA foreign_keys=ON")
             cursor.execute("PRAGMA busy_timeout=30000")
+            cursor.execute("PRAGMA foreign_keys=ON")
+            if config("DB_SQLITE_WAL", default=True, cast=bool):
+                cursor.execute("PRAGMA journal_mode=WAL")
             cursor.close()
 
     return engine
