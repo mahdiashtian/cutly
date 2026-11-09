@@ -16,7 +16,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from typing import TypeVar
 
-from celery.signals import worker_process_shutdown
+from celery.signals import worker_process_shutdown, worker_shutdown
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 
@@ -78,6 +78,7 @@ class WorkerRuntime:
 runtime = WorkerRuntime()
 
 
-@worker_process_shutdown.connect
+@worker_process_shutdown.connect  # prefork pool: each child process
+@worker_shutdown.connect          # solo pool: tasks run in the main process
 def _close_runtime(**_kwargs) -> None:
     runtime.close()

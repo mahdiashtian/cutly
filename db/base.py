@@ -9,7 +9,13 @@ from sqlalchemy.types import TypeDecorator
 
 
 class Base(DeclarativeBase):
-    """``Base.metadata`` is the schema Alembic migrations must produce."""
+    """``Base.metadata`` is the schema Alembic migrations must produce.
+
+    ``eager_defaults``: server-generated values (``created_at``) come back in the
+    INSERT's ``RETURNING`` clause instead of a second SELECT after every insert.
+    """
+
+    __mapper_args__ = {"eager_defaults": True}
 
 
 class UTCDateTime(TypeDecorator):

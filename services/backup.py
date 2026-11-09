@@ -8,7 +8,7 @@ and read in a stream with constant memory:
     {"table": "users", "row": {...}}            one line per row, parents first
     {"end": true, "counts": {...}, "sha256": "<hash of every row line>"}
 
-Versions 1 and 2 were written by the previous release (old schema, no revision).
+The revision lets a restore rebuild the backup's own schema and migrate it.
 """
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ from db.migrations import head_revision
 log = logging.getLogger(__name__)
 
 DATA_FORMAT = "cutly-data"
-DATA_VERSION = 3
+DATA_VERSION = 1
 _PARTITION = 500
 
 

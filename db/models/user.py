@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, Index, false
+from sqlalchemy import BigInteger, Boolean, Index, false, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from db.base import Base, CreatedAtMixin, UTCDateTime
@@ -16,7 +16,12 @@ class User(CreatedAtMixin, Base):
     """
 
     __tablename__ = "users"
-    __table_args__ = (Index("ix_users_created_at", "created_at"),)
+    __table_args__ = (
+        Index("ix_users_created_at", "created_at"),
+        # Only admin rows are indexed: listing admins never scans every user,
+        # and ordinary users cost this index nothing on insert.
+        Index("ix_users_admins", "id", postgresql_where=text("is_admin"), sqlite_where=text("is_admin = 1")),
+    )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
     # The bot-specific access hash lets any process (e.g. a Celery worker with a

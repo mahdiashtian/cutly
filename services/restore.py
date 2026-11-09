@@ -1,13 +1,13 @@
-"""Restore a data snapshot written by :mod:`services.backup` (any version).
+"""Restore a data snapshot written by :mod:`services.backup`.
 
 Two steps, both run by the Celery worker:
 
 1. :meth:`RestoreService.stage` loads the file into a throw-away SQLite database
    created at the *backup's own* schema revision, then runs the normal Alembic
-   migrations up to ``head``. Every constraint is checked there, and old backups
-   are converted by exactly the same code that upgrades a live database — there
-   is no second, hand-written converter to keep in sync. The current data is not
-   touched; the admin sees the row counts and confirms.
+   migrations up to ``head``. Every constraint is checked there, and a backup
+   taken before a future schema change is converted by exactly the same code
+   that upgrades a live database — no hand-written converter to keep in sync.
+   The current data is not touched; the admin sees the row counts and confirms.
 2. :meth:`RestoreService.apply` replaces all application rows with the staged
    ones inside a single transaction: it either fully succeeds or changes nothing.
 
@@ -34,12 +34,10 @@ from sqlalchemy.exc import DataError, IntegrityError
 from core.clock import as_utc
 from db.base import Base
 from db.engine import Database
-from db.migrations import upgrade
+from db.migrations import known_revisions, upgrade
 from repositories.redis.restores import StagedRestore
-from services.backup import DATA_FORMAT
+from services.backup import DATA_FORMAT, DATA_VERSION
 
-LEGACY_REVISION = "0001_sqlalchemy"  # versions 1 and 2 were written at this schema
-SUPPORTED_VERSIONS = {1, 2, 3}
 IGNORED_TABLES = {"alembic_version"}
 _MAX_LINE = 64 * 1024 * 1024
 _BATCH = 1000
@@ -62,20 +60,20 @@ class RestoreService:
         engine = create_engine(f"sqlite:///{staging}")
         event.listen(engine, "connect", lambda conn, _: conn.execute("PRAGMA foreign_keys=ON"))
         try:
-            version, counts = self._build_staging(engine, upload)
+            revision, counts = self._build_staging(engine, upload)
         except BaseException:
             engine.dispose()  # release the file first (Windows cannot delete an open file)
             staging.unlink(missing_ok=True)
             raise
         engine.dispose()
-        return StagedRestore(staging_path=str(staging), source_version=version, counts=counts)
+        return StagedRestore(staging_path=str(staging), revision=revision, counts=counts)
 
-    def _build_staging(self, engine, upload: Path) -> tuple[int, dict[str, int]]:
+    def _build_staging(self, engine, upload: Path) -> tuple[str, dict[str, int]]:
         try:
             with gzip.open(upload, "rt", encoding="utf-8") as source, engine.begin() as connection:
                 header = self._read_header(source)
-                upgrade(connection, header.get("revision") or LEGACY_REVISION)
-                self._load_rows(connection, source, strict_end=header["version"] >= 2)
+                upgrade(connection, header["revision"])
+                self._load_rows(connection, source)
                 upgrade(connection, "head")
                 counts = {
                     table.name: connection.scalar(select(func.count()).select_from(table))
@@ -88,7 +86,7 @@ class RestoreService:
         except (IntegrityError, DataError, TypeError, ValueError, KeyError, AttributeError, binascii.Error) as error:
             # Duplicate keys, missing parents, wrong value types: bad data, not a bug.
             raise RestoreError(f"داده‌های بک‌آپ با هم سازگار نیستند: {type(error).__name__}") from error
-        return header["version"], counts
+        return header["revision"], counts
 
     def _read_header(self, source) -> dict:
         try:
@@ -97,11 +95,11 @@ class RestoreService:
             raise RestoreError("این فایل بک‌آپ دادهٔ ربات نیست.") from error
         if not isinstance(header, dict) or header.get("format") != DATA_FORMAT:
             raise RestoreError("این فایل بک‌آپ دادهٔ ربات نیست.")
-        if header.get("version") not in SUPPORTED_VERSIONS:
-            raise RestoreError(f"نسخهٔ بک‌آپ پشتیبانی نمی‌شود: {header.get('version')}")
+        if header.get("version") != DATA_VERSION or header.get("revision") not in known_revisions():
+            raise RestoreError("نسخهٔ این بک‌آپ پشتیبانی نمی‌شود.")
         return header
 
-    def _load_rows(self, connection: Connection, source, *, strict_end: bool) -> None:
+    def _load_rows(self, connection: Connection, source) -> None:
         metadata = MetaData()
         metadata.reflect(connection)
         digest, counts, total_bytes = hashlib.sha256(), defaultdict(int), 0
@@ -134,13 +132,9 @@ class RestoreService:
             if pending.get(table.name):
                 connection.execute(table.insert(), pending.pop(table.name))
         if footer is None:
-            if strict_end:
-                raise RestoreError("فایل بک‌آپ ناقص است (پایان فایل یافت نشد).")
-            return
-        expected = {name: count for name, count in footer.get("counts", {}).items() if name not in IGNORED_TABLES}
-        if expected != {name: counts.get(name, 0) for name in expected} or footer.get("sha256") not in (
-            None, digest.hexdigest()
-        ):
+            raise RestoreError("فایل بک‌آپ ناقص است (پایان فایل یافت نشد).")
+        expected = footer.get("counts", {})
+        if expected != {name: counts.get(name, 0) for name in expected} or footer.get("sha256") != digest.hexdigest():
             raise RestoreError("checksum بک‌آپ معتبر نیست؛ فایل تغییر کرده یا ناقص است.")
 
     @staticmethod

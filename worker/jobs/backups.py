@@ -80,7 +80,7 @@ async def stage_restore(container: Container, client: TelegramClient, admin_id: 
     await container.staged_restores.put(admin_id, staged)
     counts = "\n".join(f"{name}: {count:,}" for name, count in staged.counts.items())
     await client.send_message(
-        peer, texts.RESTORE_PREVIEW.format(version=staged.source_version, counts=counts),
+        peer, texts.RESTORE_PREVIEW.format(version=staged.revision, counts=counts),
         buttons=keyboards.RESTORE_CONFIRM,
     )
 

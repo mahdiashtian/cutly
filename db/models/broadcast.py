@@ -40,10 +40,9 @@ class Broadcast(CreatedAtMixin, Base):
     mode: Mapped[BroadcastMode] = mapped_column(_enum(BroadcastMode, "broadcast_mode"))
     audience: Mapped[BroadcastAudience] = mapped_column(_enum(BroadcastAudience, "broadcast_audience"))
     channel_ref: Mapped[str | None] = mapped_column(String(255))
-    # The admin's own message that is copied/forwarded. NULL only for history
-    # imported from the previous release, which never stored it.
-    source_chat_id: Mapped[int | None] = mapped_column(BigInteger)
-    source_message_id: Mapped[int | None] = mapped_column(Integer)
+    # The admin's own message that is copied or forwarded.
+    source_chat_id: Mapped[int] = mapped_column(BigInteger)
+    source_message_id: Mapped[int] = mapped_column(Integer)
     status: Mapped[BroadcastStatus] = mapped_column(_enum(BroadcastStatus, "broadcast_status"))
     cancel_requested: Mapped[bool] = mapped_column(Boolean, server_default=false(), default=False)
     scheduled_at: Mapped[datetime | None] = mapped_column(UTCDateTime())

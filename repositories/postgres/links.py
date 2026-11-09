@@ -4,6 +4,7 @@ from collections import defaultdict
 from datetime import datetime
 
 from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy.orm import selectinload
 
 from core.enums import MediaType
 from db.models import Link, LinkMedia, LinkView
@@ -15,7 +16,7 @@ from schemas.user import UserAccessRow
 class LinkRepository(SqlRepository):
     # ---- reads ----
     async def get_by_code(self, code: str) -> LinkDTO | None:
-        row = await self._session.scalar(select(Link).where(Link.code == code))
+        row = await self._session.scalar(select(Link).where(Link.code == code).options(selectinload(Link.media)))
         return LinkDTO.model_validate(row) if row else None
 
     async def count_owned(self, owner_id: int) -> int:
@@ -70,8 +71,7 @@ class LinkRepository(SqlRepository):
             media=[LinkMedia(position=index, **item.model_dump()) for index, item in enumerate(media)],
         )
         self._session.add(link)
-        await self._session.flush()
-        await self._session.refresh(link, attribute_names=["created_at"])
+        await self._session.flush()  # created_at arrives via RETURNING (eager_defaults)
         return LinkDTO.model_validate(link)
 
     async def update(self, link_id: int, **values) -> None:

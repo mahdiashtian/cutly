@@ -1,17 +1,15 @@
 """Application settings, loaded once from the environment / ``.env``.
 
 Every tunable lives here so the rest of the code never reads ``os.environ``.
-Legacy variable names from the previous release (``DB_NAME``..., ``REDIS_HOST``...)
-are still understood, so an existing ``.env`` keeps working after the upgrade.
+The connection defaults match the services in ``docker-compose.yml``, so a
+copied ``.env.example`` works with ``docker compose up -d`` out of the box.
 """
 from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
-from urllib.parse import quote
 
-from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -35,13 +33,8 @@ class Settings(BaseSettings):
     # expired Telegram file reference can be refreshed.
     storage_channel_id: int = 0
 
-    # ---- PostgreSQL / SQLite ----
-    db_url: str = ""
-    db_name: str = ""
-    db_user: str = ""
-    db_password: str = ""
-    db_host: str = "localhost"
-    db_port: int = 5432
+    # ---- PostgreSQL ----
+    db_url: str = "postgresql+asyncpg://cutly:cutly@127.0.0.1:25432/cutly"
     db_pool_size: int = 10
     db_max_overflow: int = 20
     db_pool_timeout: float = 30
@@ -54,28 +47,29 @@ class Settings(BaseSettings):
     # ---- Redis ----
     # The cache Redis is disposable (LRU eviction is fine); the state Redis holds
     # conversations, upload sessions and the Celery queue, so it must not evict.
-    # Both default to REDIS_URL so a single instance works for small deployments.
-    redis_url: str = ""
-    redis_host: str = "localhost"
-    redis_port: int = 6379
-    redis_db: int = 0
-    redis_password: str = ""
-    redis_cache_url: str = ""
-    redis_state_url: str = ""
+    redis_cache_url: str = "redis://127.0.0.1:26379/0"
+    redis_state_url: str = "redis://127.0.0.1:26380/0"
     redis_max_connections: int = 64
+    # Empty means: use the state Redis.
     celery_broker_url: str = ""
 
     # ---- Cache & state lifetimes (seconds) ----
     # Entities are written through on every change; the TTL only bounds the
     # damage of a rare read/write race and keeps cold keys from living forever.
     cache_ttl_seconds: int = 86_400
-    # Only a *positive* membership answer is cached (see services.membership).
+    # Only a *positive* membership answer is cached (see bot.membership).
     forced_join_cache_seconds: int = 60
     # An abandoned conversation or upload session expires on its own.
     conversation_ttl_seconds: int = 86_400
     # last_active_at is written at most once per window per user, instead of on
     # every message; broadcast segments only need day-level precision.
     activity_touch_seconds: int = 300
+
+    # ---- Background workers ----
+    # True: ``python main.py`` also starts the Celery worker and beat processes.
+    # Set False when they run as separate services (e.g. several worker hosts).
+    embedded_workers: bool = True
+    worker_concurrency: int = 4
 
     # ---- Features ----
     delete_after_seconds: int = 30
@@ -91,43 +85,9 @@ class Settings(BaseSettings):
     pg_dump_path: str = ""
     pg_tool_timeout: int = 900
 
-    @model_validator(mode="after")
-    def _resolve_urls(self) -> Settings:
-        self.db_url = _normalise_db_url(self.db_url) or self._assembled_db_url()
-        if not self.redis_url:
-            password = f":{quote(self.redis_password, safe='')}@" if self.redis_password else ""
-            self.redis_url = f"redis://{password}{self.redis_host}:{self.redis_port}/{self.redis_db}"
-        self.redis_cache_url = self.redis_cache_url or self.redis_url
-        self.redis_state_url = self.redis_state_url or self.redis_url
-        self.celery_broker_url = self.celery_broker_url or self.redis_state_url
-        return self
-
-    def _assembled_db_url(self) -> str:
-        if self.db_name and self.db_user:
-            password = quote(self.db_password, safe="")
-            return (
-                f"postgresql+asyncpg://{self.db_user}:{password}"
-                f"@{self.db_host}:{self.db_port}/{self.db_name}"
-            )
-        return "sqlite+aiosqlite:///db.sqlite3"
-
     @property
-    def bot_id(self) -> int:
-        return int(self.bot_token.split(":", 1)[0]) if ":" in self.bot_token else 0
-
-
-def _normalise_db_url(url: str) -> str:
-    """Accept the legacy ``sqlite://`` / ``postgres://`` spellings."""
-    if not url:
-        return ""
-    if url.startswith("sqlite://") and not url.startswith("sqlite:///"):
-        url = "sqlite:///" + url[len("sqlite://"):]
-    for prefix in ("postgres://", "postgresql://"):
-        if url.startswith(prefix):
-            return "postgresql+asyncpg://" + url[len(prefix):]
-    if url.startswith("sqlite:///"):
-        return "sqlite+aiosqlite:///" + url[len("sqlite:///"):]
-    return url
+    def broker_url(self) -> str:
+        return self.celery_broker_url or self.redis_state_url
 
 
 @lru_cache

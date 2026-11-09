@@ -1,8 +1,10 @@
 """Celery application and Celery Beat schedule.
 
-Start the processes with::
+``python main.py`` starts the worker and beat processes itself (see
+``worker/processes.py``); they can also be run on their own, e.g.::
 
-    celery -A worker.app worker -Q default,broadcasts -c 4 --loglevel=INFO
+    celery -A worker.app worker -Q default -n default@%h --loglevel=INFO
+    celery -A worker.app worker -Q broadcasts -n broadcasts@%h --pool=solo --loglevel=INFO
     celery -A worker.app beat --loglevel=INFO
 """
 from __future__ import annotations
@@ -14,7 +16,7 @@ from worker.queue import BROADCAST_QUEUE, DEFAULT_QUEUE, TaskName
 
 
 def create_celery(settings: Settings) -> Celery:
-    app = Celery("cutly", broker=settings.celery_broker_url, include=["worker.tasks"])
+    app = Celery("cutly", broker=settings.broker_url, include=["worker.tasks"])
     app.conf.update(
         task_default_queue=DEFAULT_QUEUE,
         # A broadcast can run for hours; its own queue keeps it from starving

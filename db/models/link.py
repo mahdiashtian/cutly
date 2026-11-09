@@ -54,7 +54,10 @@ class Link(CreatedAtMixin, Base):
         order_by="LinkMedia.position",
         cascade="all, delete-orphan",
         passive_deletes=True,
-        lazy="selectin",
+        # Never loaded implicitly: lists of links (history) do not need the
+        # media rows, and an accidental lazy load in async code is an error
+        # rather than a hidden extra query. Load with selectinload() on demand.
+        lazy="raise",
     )
 
 

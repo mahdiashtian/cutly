@@ -111,10 +111,8 @@ class BroadcastRunner:
         await self._send_report()
 
     async def _load_source(self) -> Message | None:
-        broadcast = self._broadcast
-        if broadcast.source_message_id is None:
-            return None
-        return await self._client.get_messages(self._admin_peer, ids=broadcast.source_message_id)
+        """``None`` when the admin deleted the message before it was sent."""
+        return await self._client.get_messages(self._admin_peer, ids=self._broadcast.source_message_id)
 
     async def _post_status(self) -> int:
         message = await self._client.send_message(

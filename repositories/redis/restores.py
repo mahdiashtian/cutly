@@ -11,7 +11,7 @@ STAGED_RESTORE_TTL_SECONDS = 30 * 60
 
 class StagedRestore(BaseDTO):
     staging_path: str
-    source_version: int
+    revision: str
     counts: dict[str, int]
 
 

@@ -1,5 +1,5 @@
 """PostgreSQL-only behaviour: partial unique index, RETURNING, sequences,
-real concurrency and the migration on PostgreSQL.
+real concurrency and the migration's PostgreSQL storage options.
 
 Skipped unless CUTLY_TEST_POSTGRES_URL points at an empty, disposable database
 (``postgresql+asyncpg://…``). The ``public`` schema is dropped and recreated.
@@ -11,14 +11,12 @@ import os
 from pathlib import Path
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from container import Container
 from core.enums import BroadcastAudience, BroadcastMode
-from core.security import verify_password
 from db.migrations import upgrade
-from db.models import Link, LinkMedia, User
 from tests.conftest import make_settings, media
 
 URL = os.environ.get("CUTLY_TEST_POSTGRES_URL", "")
@@ -42,6 +40,20 @@ async def pg(tmp_path: Path):
     await container.startup()
     yield container
     await container.shutdown()
+
+
+async def test_storage_tuning_and_partial_indexes(pg):
+    async with pg.database.engine.connect() as connection:
+        options = dict((await connection.execute(text(
+            "SELECT relname, reloptions FROM pg_class WHERE relname IN ('links', 'users')"
+        ))).all())
+        partial = dict((await connection.execute(text(
+            "SELECT indexname, indexdef FROM pg_indexes WHERE indexname IN "
+            "('ix_users_admins', 'uq_broadcasts_single_running')"
+        ))).all())
+    assert options == {"links": ["fillfactor=90"], "users": ["fillfactor=90"]}
+    assert "WHERE is_admin" in partial["ix_users_admins"]
+    assert "WHERE" in partial["uq_broadcasts_single_running"]
 
 
 async def test_download_cap_with_real_concurrency(pg):
@@ -71,33 +83,3 @@ async def test_stats_and_backup_round_trip(pg, tmp_path):
     await pg.restores.apply(staged)
     restored = await pg.links.create(10, [media()], expires_at=None, max_downloads=None)
     assert restored.id > link.id  # sequences were moved past the restored ids
-
-
-async def test_migration_converts_legacy_rows_on_postgres(tmp_path):
-    await _reset_schema("0001_sqlalchemy")
-    engine = create_async_engine(URL)
-    statements = (
-        """INSERT INTO "user" (id, userid, created_at, is_superuser, is_staff)
-           VALUES (1, 500, now(), false, true), (2, 600, now(), false, false)""",
-        """INSERT INTO file (id, type, size, code, file_id, access_hash, file_reference, message_id, count,
-                             password, caption, album_id, album_order, created_at, owner_id) VALUES
-           (1, 'photo', 1, 'abc', 1, 1, '\\x01', 1, 4, 'pw', 'c', 'A', 0, now(), 500),
-           (2, 'video', 2, 'abc_part1', 2, 2, '\\x02', 2, 4, 'pw', 'c', 'A', 1, now(), 500),
-           (3, 'document', 3, 'single', 3, 3, '\\x03', 3, 0, NULL, NULL, NULL, 0, now(), 600)""",
-        """INSERT INTO file_access_log (id, viewer_id, file_code, owner_id, accessed_at)
-           VALUES (1, 600, 'abc', 500, now())""",
-    )
-    async with engine.begin() as connection:
-        for statement in statements:
-            await connection.execute(text(statement))
-    async with engine.begin() as connection:
-        await connection.run_sync(lambda sync: upgrade(sync, "head"))
-        admins = (await connection.execute(select(User.id).where(User.is_admin))).scalars().all()
-        links = {row.code: row for row in await connection.execute(select(Link.__table__))}
-        positions = (await connection.execute(
-            select(LinkMedia.position, LinkMedia.media_type).where(LinkMedia.link_id == links["abc"].id)
-            .order_by(LinkMedia.position))).all()
-    await engine.dispose()
-    assert admins == [500]
-    assert set(links) == {"abc", "single"} and verify_password("pw", links["abc"].password_hash)
-    assert positions == [(0, "photo"), (1, "video")]

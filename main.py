@@ -1,11 +1,15 @@
-"""Bot process entrypoint: ``python main.py``.
+"""Run the whole project: ``python main.py``.
 
-Background work (broadcasts, deletions, backups, restores) runs in the Celery
-worker; see ``worker/app.py`` for the worker and beat commands.
+1. upgrade the database schema (once, before anything else touches it);
+2. start the Celery worker and beat processes (unless EMBEDDED_WORKERS=false);
+3. run the bot until it is stopped (Ctrl+C), then stop the workers.
+
+The databases themselves run in Docker: ``docker compose up -d``.
 """
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 
 from bot.app import BotApp
@@ -15,8 +19,9 @@ from bot.telegram import build_client
 from container import Container
 from core.config import Settings, get_settings
 from core.logs import setup_logging
-from db.migrations import assert_schema_is_current
+from db.migrations import upgrade_to_head
 from worker.app import celery_app
+from worker.processes import ProcessGroup, celery_processes
 from worker.queue import TaskQueue
 
 log = logging.getLogger("cutly")
@@ -28,23 +33,13 @@ def _require(settings: Settings) -> None:
         raise SystemExit("missing required settings: " + ", ".join(missing))
 
 
-async def run() -> None:
-    settings = get_settings()
-    setup_logging(settings.log_level)
-    _require(settings)
-
-    container = Container(settings)
-    await container.startup()
+async def run_bot(container: Container, settings: Settings) -> None:
     client = build_client(settings)
+    app = BotApp(container, client, TaskQueue(celery_app))
+    Dispatcher(app, build_router()).register()
     try:
-        await assert_schema_is_current(container.database.engine)
-        await container.warm_cache()
-        app = BotApp(container, client, TaskQueue(celery_app))
-        Dispatcher(app, build_router()).register()
-
         await client.start(bot_token=settings.bot_token)
-        me = await client.get_me()
-        app.username = me.username or ""
+        app.username = (await client.get_me()).username or ""
         log.info("bot started as @%s", app.username)
         try:
             await client.catch_up()  # answer what arrived while we were down
@@ -53,6 +48,23 @@ async def run() -> None:
         await client.run_until_disconnected()
     finally:
         await client.disconnect()
+
+
+async def run() -> None:
+    settings = get_settings()
+    setup_logging(settings.log_level)
+    _require(settings)
+
+    container = Container(settings)
+    await container.startup()
+    workers = ProcessGroup(celery_processes(settings) if settings.embedded_workers else [])
+    try:
+        await upgrade_to_head(container.database.engine)
+        await container.warm_cache()
+        await workers.start()
+        await run_bot(container, settings)
+    finally:
+        await workers.stop()
         await container.shutdown()
         log.info("shutdown complete")
 
@@ -61,10 +73,12 @@ def main() -> None:
     # uvloop is a faster event loop; it has no Windows build, so fall back.
     try:
         import uvloop
+        runner = uvloop.run
     except ModuleNotFoundError:
-        asyncio.run(run())
-    else:
-        uvloop.run(run())
+        runner = asyncio.run
+    # Ctrl+C: run() has already stopped the workers in its finally block.
+    with contextlib.suppress(KeyboardInterrupt):
+        runner(run())
 
 
 if __name__ == "__main__":

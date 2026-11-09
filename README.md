@@ -11,43 +11,36 @@ Celery + Celery Beat · Pydantic.
 The design (layers, cache, database, background jobs) and the reasons behind
 each decision are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-## Processes
+## Run
 
-| Process | Command | Role |
-| --- | --- | --- |
-| migrate | `alembic upgrade head` | Run once per deploy, before the others |
-| bot | `python main.py` | Answers Telegram updates; never does long work itself |
-| worker | `celery -A worker.app worker -Q default,broadcasts -c 4` | Broadcasts, message auto-delete, backups, restores |
-| beat | `celery -A worker.app beat` | Starts scheduled broadcasts, cleans temp files, refreshes channel titles |
-
-## Run with Docker
+Requirements: Python 3.11+ and Docker.
 
 ```bash
-cp .env.example .env   # fill in API_ID, API_HASH, BOT_TOKEN, ADMIN_MASTER, STORAGE_CHANNEL_ID
-docker compose up -d --build
-```
-
-## Run locally
-
-Python 3.11+, PostgreSQL and Redis.
-
-```bash
+cp .env.example .env          # fill in API_ID, API_HASH, BOT_TOKEN, ADMIN_MASTER, STORAGE_CHANNEL_ID
+docker compose up -d          # PostgreSQL + Redis (cache) + Redis (state)
 python -m venv .venv && . .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-alembic upgrade head
 python main.py
-celery -A worker.app worker -Q default,broadcasts -c 4 --loglevel=INFO   # second terminal
-celery -A worker.app beat --loglevel=INFO                               # third terminal
 ```
 
-On Windows add `--pool=solo` to the worker (Celery's prefork pool is POSIX only).
+`python main.py` upgrades the database schema, starts the Celery worker and beat
+processes, and runs the bot; Ctrl+C stops all of them.
 
-## Upgrading from the previous release
+The Docker services listen on localhost only, on fixed ports that avoid the
+usual defaults:
 
-`alembic upgrade head` converts the old tables in place (users, files, albums,
-access logs, channels, broadcast history, settings); plain-text link passwords are
-hashed on the way. Take a backup first — the conversion has no downgrade. Old
-`.jsonl.gz` data backups can still be restored from the admin panel.
+| Service | Port | Used by |
+| --- | --- | --- |
+| postgres | 25432 | `DB_URL` |
+| redis-cache | 26379 | `REDIS_CACHE_URL` |
+| redis-state | 26380 | `REDIS_STATE_URL` (also the Celery queue) |
+
+To run the background processes yourself (for example on other machines), set
+`EMBEDDED_WORKERS=false` and start them with the commands in `worker/app.py`.
+
+The full database backup in the admin panel uses `pg_dump`; install the
+PostgreSQL 17 client tools on the host or set `PG_DUMP_PATH`. The data-only
+backup needs nothing extra.
 
 ## Tests
 

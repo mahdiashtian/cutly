@@ -1,18 +1,13 @@
 name: cutly
 
-# One image, four roles: migrate (runs once), bot, worker, beat.
-# Two Redis instances, as in couplyo: the cache may evict, the state must not.
-
-x-app: &app
-  build: .
-  env_file: .env
-  environment:
-    DB_URL: postgresql+asyncpg://cutly:${POSTGRES_PASSWORD:-cutly}@postgres:5432/cutly
-    REDIS_CACHE_URL: redis://redis-cache:6379/0
-    REDIS_STATE_URL: redis://redis-state:6379/0
-  volumes:
-    - backups:/app/backup
-  restart: unless-stopped
+# Only the infrastructure runs in Docker; the project itself runs on the host
+# with `python main.py` (bot + Celery worker + beat), as in couplyo.
+#
+#   docker compose up -d
+#
+# Ports are fixed and published on localhost only. The usual ones (5432, 6379…)
+# are already taken on the development machine, so these are deliberately
+# different. They must match DB_URL / REDIS_*_URL in .env (.env.example has them).
 
 services:
   postgres:
@@ -20,64 +15,47 @@ services:
     environment:
       POSTGRES_DB: cutly
       POSTGRES_USER: cutly
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cutly}
+      POSTGRES_PASSWORD: cutly
+    ports:
+      - "127.0.0.1:25432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD", "pg_isready", "-U", "cutly"]
+      test: ["CMD", "pg_isready", "-U", "cutly", "-d", "cutly"]
       interval: 5s
+      timeout: 3s
       retries: 20
     restart: unless-stopped
 
+  # Disposable entity cache: no persistence, evicts least-recently-used keys.
   redis-cache:
     image: redis:7.4-alpine
     command: redis-server --save '' --appendonly no --maxmemory 256mb --maxmemory-policy allkeys-lru
+    ports:
+      - "127.0.0.1:26379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
     restart: unless-stopped
 
+  # Conversations, upload sessions and the Celery queue: persisted, never evicted.
   redis-state:
     image: redis:7.4-alpine
     command: redis-server --appendonly yes --appendfsync everysec --maxmemory-policy noeviction
+    ports:
+      - "127.0.0.1:26380:6379"
     volumes:
       - redis-state-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
     restart: unless-stopped
-
-  migrate:
-    <<: *app
-    command: alembic upgrade head
-    restart: "no"
-    depends_on:
-      postgres: {condition: service_healthy}
-
-  bot:
-    <<: *app
-    command: python main.py
-    volumes:
-      - backups:/app/backup
-      - sessions:/app/sessions
-    environment:
-      DB_URL: postgresql+asyncpg://cutly:${POSTGRES_PASSWORD:-cutly}@postgres:5432/cutly
-      REDIS_CACHE_URL: redis://redis-cache:6379/0
-      REDIS_STATE_URL: redis://redis-state:6379/0
-      SESSION_NAME: /app/sessions/cutly
-    depends_on:
-      migrate: {condition: service_completed_successfully}
-      redis-cache: {condition: service_started}
-      redis-state: {condition: service_started}
-
-  worker:
-    <<: *app
-    command: celery -A worker.app worker -Q default,broadcasts -c 4 --loglevel=INFO
-    depends_on:
-      migrate: {condition: service_completed_successfully}
-
-  beat:
-    <<: *app
-    command: celery -A worker.app beat --loglevel=INFO --schedule /tmp/celerybeat-schedule
-    depends_on:
-      migrate: {condition: service_completed_successfully}
+    stop_grace_period: 30s
 
 volumes:
   postgres-data:
   redis-state-data:
-  backups:
-  sessions:

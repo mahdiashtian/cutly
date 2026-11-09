@@ -68,4 +68,6 @@ def _sqlite_pragmas(connection, _record) -> None:
     cursor.execute("PRAGMA foreign_keys=ON")
     cursor.execute("PRAGMA busy_timeout=30000")
     cursor.execute("PRAGMA journal_mode=WAL")
+    # Safe with WAL (no corruption on crash) and avoids an fsync per commit.
+    cursor.execute("PRAGMA synchronous=NORMAL")
     cursor.close()

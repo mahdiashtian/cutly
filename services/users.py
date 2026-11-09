@@ -57,7 +57,7 @@ class UserService(Service):
         except RedisError:
             return  # activity is best-effort; never fail a message over it
         async with self._uow() as uow:
-            await uow.users.update(user_id, last_active_at=utcnow())
+            await uow.users.touch(user_id, utcnow())
 
     async def is_admin(self, user_id: int) -> bool:
         if user_id == self._admin_master:

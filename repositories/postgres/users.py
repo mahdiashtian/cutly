@@ -40,8 +40,13 @@ class UserRepository(SqlRepository):
         row = result.scalar_one_or_none()
         return UserDTO.model_validate(row) if row else None
 
+    async def touch(self, user_id: int, when: datetime) -> None:
+        """Hot path: a plain UPDATE, no RETURNING of a row nobody reads."""
+        await self._session.execute(update(User).where(User.id == user_id).values(last_active_at=when))
+
     async def admin_ids(self) -> list[int]:
-        result = await self._session.scalars(select(User.id).where(User.is_admin.is_(True)).order_by(User.id))
+        # Bare boolean condition so it matches the partial index predicate.
+        result = await self._session.scalars(select(User.id).where(User.is_admin).order_by(User.id))
         return list(result)
 
     # ---- broadcast audiences (keyset pagination: constant memory, no OFFSET) ----

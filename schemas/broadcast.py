@@ -12,8 +12,8 @@ class BroadcastDTO(BaseDTO):
     mode: BroadcastMode
     audience: BroadcastAudience
     channel_ref: str | None
-    source_chat_id: int | None
-    source_message_id: int | None
+    source_chat_id: int
+    source_message_id: int
     status: BroadcastStatus
     cancel_requested: bool
     scheduled_at: datetime | None
