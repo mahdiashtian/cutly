@@ -1,0 +1,83 @@
+name: cutly
+
+# One image, four roles: migrate (runs once), bot, worker, beat.
+# Two Redis instances, as in couplyo: the cache may evict, the state must not.
+
+x-app: &app
+  build: .
+  env_file: .env
+  environment:
+    DB_URL: postgresql+asyncpg://cutly:${POSTGRES_PASSWORD:-cutly}@postgres:5432/cutly
+    REDIS_CACHE_URL: redis://redis-cache:6379/0
+    REDIS_STATE_URL: redis://redis-state:6379/0
+  volumes:
+    - backups:/app/backup
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: cutly
+      POSTGRES_USER: cutly
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cutly}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "cutly"]
+      interval: 5s
+      retries: 20
+    restart: unless-stopped
+
+  redis-cache:
+    image: redis:7.4-alpine
+    command: redis-server --save '' --appendonly no --maxmemory 256mb --maxmemory-policy allkeys-lru
+    restart: unless-stopped
+
+  redis-state:
+    image: redis:7.4-alpine
+    command: redis-server --appendonly yes --appendfsync everysec --maxmemory-policy noeviction
+    volumes:
+      - redis-state-data:/data
+    restart: unless-stopped
+
+  migrate:
+    <<: *app
+    command: alembic upgrade head
+    restart: "no"
+    depends_on:
+      postgres: {condition: service_healthy}
+
+  bot:
+    <<: *app
+    command: python main.py
+    volumes:
+      - backups:/app/backup
+      - sessions:/app/sessions
+    environment:
+      DB_URL: postgresql+asyncpg://cutly:${POSTGRES_PASSWORD:-cutly}@postgres:5432/cutly
+      REDIS_CACHE_URL: redis://redis-cache:6379/0
+      REDIS_STATE_URL: redis://redis-state:6379/0
+      SESSION_NAME: /app/sessions/cutly
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis-cache: {condition: service_started}
+      redis-state: {condition: service_started}
+
+  worker:
+    <<: *app
+    command: celery -A worker.app worker -Q default,broadcasts -c 4 --loglevel=INFO
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+
+  beat:
+    <<: *app
+    command: celery -A worker.app beat --loglevel=INFO --schedule /tmp/celerybeat-schedule
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+
+volumes:
+  postgres-data:
+  redis-state-data:
+  backups:
+  sessions:

@@ -1,140 +1,96 @@
-"""Isolated databases, Redis and Telegram doubles; no production credentials."""
+"""Shared fixtures: a real Container on in-memory SQLite + fakeredis, and fakes
+for the few Telegram calls the tests exercise. Nothing touches the network."""
+from __future__ import annotations
 
 import os
-from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from dataclasses import dataclass, field
+from itertools import count
+from pathlib import Path
 
-os.environ["API_ID"] = "12345"
-os.environ["API_HASH"] = "0" * 32
-os.environ["BOT_TOKEN"] = "12345:test-token"
-os.environ["ADMIN_MASTER"] = "999"
-os.environ["SESSION_NAME"] = ":memory:"
-os.environ["SESSION_STRING"] = ""
-os.environ["REDIS_ENABLED"] = "false"
-
-from telethon.sessions import StringSession
-from telethon.crypto import AuthKey
-
-_session = StringSession()
-_session.set_dc(2, "149.154.167.51", 443)
-_session.auth_key = AuthKey(bytes(256))
-os.environ["SESSION_STRING"] = _session.save()
-
-import fakeredis
 import pytest
-import pytest_asyncio
-from core import cache as cache_module
-from core.database import close_db, init_db
-from core.cache import RedisCache
-from services.user import create_user_from_db
-from services.file import create_file_from_db
+
+os.environ.update(API_ID="1", API_HASH="test", BOT_TOKEN="1:test", ENVIRONMENT="test")
+
+from container import Container  # noqa: E402
+from core.config import Settings  # noqa: E402
+from core.enums import MediaType  # noqa: E402
+from schemas.link import MediaItem  # noqa: E402
 
 
-@pytest_asyncio.fixture(autouse=True)
-async def isolated_db(tmp_path, monkeypatch):
-    await close_db()
-    monkeypatch.setenv("BACKUP_DIR", str(tmp_path / "backup"))
-    monkeypatch.setenv(
-        "DB_URL", "sqlite+aiosqlite:///" + (tmp_path / "test.sqlite3").as_posix()
+def make_settings(tmp_path: Path, **overrides) -> Settings:
+    values = dict(
+        environment="test", api_id=1, api_hash="test", bot_token="1:test",
+        db_url="sqlite+aiosqlite:///:memory:", backup_dir=tmp_path / "backup",
+        admin_master=1, storage_channel_id=-100500, broadcast_rate_per_second=1000,
     )
-    cache = RedisCache()
-    cache.enabled = True
-    cache.redis = fakeredis.FakeAsyncRedis(decode_responses=True)
-    monkeypatch.setattr(cache_module, "_cache_instance", cache)
-    await init_db()
-    yield cache
-    await cache.close()
-    await close_db()
-
-
-@pytest_asyncio.fixture
-async def owner():
-    return await create_user_from_db({"userid": 5_000_000_001})
-
-
-@pytest_asyncio.fixture
-async def make_file(owner):
-    async def make(code="abc123", **values):
-        return await create_file_from_db(
-            {
-                "code": code,
-                "owner_id": owner.userid,
-                "type": "photo",
-                "size": 2048,
-                "file_id": 8_000_000_000_001,
-                "access_hash": -6_000_000_000_001,
-                "file_reference": b"\x00\xffref",
-                "message_id": 55,
-                **values,
-            }
-        )
-
-    return make
+    values.update(overrides)
+    return Settings(**values)
 
 
 @pytest.fixture
-def telegram():
-    client = SimpleNamespace(
-        send_message=AsyncMock(return_value=SimpleNamespace(id=1)),
-        send_file=AsyncMock(return_value=SimpleNamespace(id=10, chat_id=100)),
-        forward_messages=AsyncMock(return_value=SimpleNamespace(id=55)),
-        get_permissions=AsyncMock(return_value=SimpleNamespace(is_admin=False)),
-        get_entity=AsyncMock(return_value=SimpleNamespace(title="Channel")),
-        delete_messages=AsyncMock(),
-        edit_message=AsyncMock(),
-        start=AsyncMock(),
-        disconnect=AsyncMock(),
-        get_me=AsyncMock(return_value=SimpleNamespace(username="cutly_bot")),
-        run_until_disconnected=AsyncMock(),
-    )
-    return client
+async def container(tmp_path: Path):
+    container = Container(make_settings(tmp_path))
+    await container.startup()
+    await container.database.create_all()
+    yield container
+    await container.shutdown()
 
 
-@pytest.fixture
-def app(monkeypatch, telegram):
-    import main
-    from core.upload_session import get_upload_manager
-
-    main.CONVERSATION_STATE.clear()
-    main.CONVERSATION_OBJECT.clear()
-    main.USER_LIST.clear()
-    main.USER_IDS.clear()
-    main.LIST_VIDEO.clear()
-    main.BROADCAST_DRAFTS.clear()
-    main.ADMIN_LOG_CONTEXT.clear()
-    for user_id in list(main.RESTORE_DRAFTS):
-        main.clear_restore_draft(user_id)
-    main.CHANNEL_JOIN_LIST = {}
-    main.CHANNEL_JOIN_REVISION = main.channel_revision()
-    main.CHANNEL_JOIN_VERSION = None
-    main.CHANNEL_JOIN_BUILT_AT = main.time.monotonic()
-    main.BOT_USERNAME = "cutly_bot"
-    main.BROADCAST_IN_PROGRESS = False
-    main.BROADCAST_CANCEL_EVENT = None
-    get_upload_manager()._sessions.clear()
-    monkeypatch.setattr(main, "CLIENT", telegram)
-    monkeypatch.setattr(main, "STORAGE_CHANNEL_ID", -100555)
-    yield main
+_ids = count(1000)
 
 
-@pytest.fixture
-def event_factory(telegram):
-    from telethon import types
+def media(media_type: MediaType = MediaType.PHOTO, size: int = 1024) -> MediaItem:
+    file_id = next(_ids)
+    return MediaItem(media_type=media_type, size=size, tg_file_id=file_id, tg_access_hash=-file_id,
+                     tg_file_reference=b"\x00ref" + bytes([file_id % 256]), storage_message_id=file_id)
 
-    def make(text="", user_id=5_000_000_001, **values):
-        return SimpleNamespace(
-            sender_id=user_id,
-            chat_id=user_id,
-            raw_text=text,
-            is_private=True,
-            client=telegram,
-            get_sender=AsyncMock(
-                return_value=types.User(id=user_id, first_name="Test")
-            ),
-            message=SimpleNamespace(
-                grouped_id=None, text=text, sticker=None, media=None
-            ),
-            **values,
-        )
 
-    return make
+@dataclass
+class SentMessage:
+    id: int
+    chat_id: int
+    text: str = ""
+    buttons: object = None
+    file: object = None
+
+
+@dataclass
+class FakeClient:
+    """Records what the bot sends; behaves like the few TelegramClient methods used."""
+
+    sent: list[SentMessage] = field(default_factory=list)
+    edits: list[tuple[int, str]] = field(default_factory=list)
+    forwarded: list[tuple[object, object]] = field(default_factory=list)
+    fail_for: dict[int, Exception] = field(default_factory=dict)
+    _ids: count = field(default_factory=lambda: count(1))
+
+    def _record(self, chat, **kwargs) -> SentMessage:
+        chat_id = getattr(chat, "user_id", chat)
+        if chat_id in self.fail_for:
+            raise self.fail_for.pop(chat_id)
+        message = SentMessage(id=next(self._ids), chat_id=chat_id, **kwargs)
+        self.sent.append(message)
+        return message
+
+    async def send_message(self, chat, text="", buttons=None, **_):
+        return self._record(chat, text=text if isinstance(text, str) else "<copy>", buttons=buttons)
+
+    async def send_file(self, chat, file, caption=None, buttons=None, **_):
+        if isinstance(file, list):
+            return [self._record(chat, text=c, file=f) for f, c in zip(file, caption, strict=True)]
+        return self._record(chat, text=caption or "", file=file, buttons=buttons)
+
+    async def forward_messages(self, chat, messages, from_peer=None):
+        self.forwarded.append((chat, messages))
+        if isinstance(messages, list):
+            return [SentMessage(id=next(self._ids), chat_id=chat) for _ in messages]
+        return self._record(chat, text="<forward>")
+
+    async def edit_message(self, chat, message_id, text):
+        self.edits.append((message_id, text))
+
+    async def get_messages(self, chat, ids=None):
+        return SentMessage(id=ids, chat_id=chat, text="source")
+
+    def texts_to(self, chat_id: int) -> list[str]:
+        return [message.text for message in self.sent if message.chat_id == chat_id]
