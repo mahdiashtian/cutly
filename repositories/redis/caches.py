@@ -11,6 +11,9 @@ from schemas.settings import BotSettingsDTO
 from schemas.user import UserDTO
 
 _CHANNELS = TypeAdapter(list[ChannelDTO])
+# "This code does not exist" is kept briefly: long enough to absorb repeated
+# lookups, short enough that random codes cannot pile up in memory.
+NEGATIVE_TTL_SECONDS = 300
 
 
 class UserCache(RedisCache):
@@ -29,7 +32,7 @@ class LinkCache(RedisCache):
         await self._set_model(keys.link(link.code), link)
 
     async def set_absent(self, code: str) -> None:
-        await self._set_model(keys.link(code), None)
+        await self._set_model(keys.link(code), None, ttl=NEGATIVE_TTL_SECONDS)
 
     async def invalidate(self, code: str) -> None:
         await self._delete(keys.link(code))

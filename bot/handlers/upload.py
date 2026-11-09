@@ -18,7 +18,7 @@ log = logging.getLogger(__name__)
 router = Router()
 
 
-@router.text(Btn.UPLOAD, join=True)
+@router.text(Btn.UPLOAD)
 async def start_upload(ctx: Context) -> None:
     await ctx.app.container.uploads.start(ctx.user_id)
     await ctx.go(State.UPLOADING)
@@ -56,7 +56,12 @@ async def _store(ctx: Context, messages: list[Message]) -> None:
         log.exception("forwarding to the storage channel failed")
         await ctx.reply(texts.UPLOAD_STORE_FAILED)
         return
-    await uploads.add(ctx.user_id, [ref.stored_as(copy.id) for ref, copy in zip(refs, forwarded, strict=True)])
+    added = await uploads.add(
+        ctx.user_id, [ref.stored_as(copy.id) for ref, copy in zip(refs, forwarded, strict=True)], limit=limit
+    )
+    if added is None:  # a concurrent upload filled the session first
+        await ctx.reply(texts.UPLOAD_TOO_MANY.format(limit=limit), buttons=keyboards.UPLOAD_SESSION)
+        return
     items = await uploads.items(ctx.user_id)
     await ctx.reply(
         texts.UPLOAD_SAVED.format(count=len(items), size=texts.file_size(sum(i.size for i in items))),

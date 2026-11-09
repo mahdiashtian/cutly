@@ -13,12 +13,13 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from enum import Enum, auto
 from typing import TYPE_CHECKING, Any
 
 from telethon import events
 from telethon.tl.custom import Message
 
-from bot.states import State
+from bot.states import ADMIN_STATES, State
 
 if TYPE_CHECKING:
     from bot.app import BotApp
@@ -78,11 +79,27 @@ AlbumHandler = Callable[[Context, list[Message]], Awaitable[None]]
 CallbackHandler = Callable[[CallbackContext], Awaitable[None]]
 
 
+class Access(Enum):
+    """Who may use a route. Checked by the dispatcher before the handler runs.
+
+    * USER  — anyone, but only after joining every mandatory channel. This is
+      the default, and it applies to *every* step of a flow, not only its first
+      message: leaving the channel half-way cannot be used to skip the check.
+    * ADMIN — database admins and the owner; no forced join.
+    * OWNER — only ADMIN_MASTER: managing admins and anything that exports or
+      replaces the whole database (least privilege: an ordinary admin cannot
+      escalate, lock others out, dump every user or wipe the data).
+    """
+
+    USER = auto()
+    ADMIN = auto()
+    OWNER = auto()
+
+
 @dataclass(frozen=True)
 class Route:
     handler: Handler
-    admin: bool = False
-    require_join: bool = False
+    access: Access = Access.USER
     states: frozenset[State] | None = None  # None: valid in every state
 
     def accepts(self, state: State) -> bool:
@@ -92,7 +109,14 @@ class Route:
 @dataclass(frozen=True)
 class CallbackRoute:
     handler: CallbackHandler
-    admin: bool = False
+    access: Access = Access.USER
+
+
+def _check_admin_states(states: frozenset[State] | None, access: Access, where: str) -> None:
+    """Fail at startup, not in production: an admin-only state must never be
+    reachable through a route that forgot to require admin rights."""
+    if access is Access.USER and states and states & ADMIN_STATES:
+        raise ValueError(f"{where}: routes for admin states must use Access.ADMIN or Access.OWNER")
 
 
 @dataclass
@@ -103,10 +127,11 @@ class Router:
     callbacks: dict[str, CallbackRoute] = field(default_factory=dict)
 
     # ---- registration (decorators) ----
-    def text(self, *labels: str, admin: bool = False, join: bool = False,
+    def text(self, *labels: str, access: Access = Access.USER,
              states: set[State] | frozenset[State] | None = None):
         def register(handler: Handler) -> Handler:
-            route = Route(handler, admin, join, frozenset(states) if states else None)
+            route = Route(handler, access, frozenset(states) if states else None)
+            _check_admin_states(route.states, access, handler.__qualname__)
             for label in labels:
                 # State-scoped routes are tried before global ones.
                 routes = self.texts.setdefault(label, [])
@@ -114,23 +139,26 @@ class Router:
             return handler
         return register
 
-    def state(self, state: State, *, admin: bool = False, join: bool = False):
+    def state(self, state: State, *, access: Access = Access.USER):
         def register(handler: Handler) -> Handler:
             if state in self.states:
                 raise ValueError(f"{state} already has a handler")
-            self.states[state] = Route(handler, admin, join)
+            _check_admin_states(frozenset({state}), access, handler.__qualname__)
+            self.states[state] = Route(handler, access)
             return handler
         return register
 
     def album(self, state: State):
+        """Album handlers are user routes (forced join applies)."""
         def register(handler: AlbumHandler) -> AlbumHandler:
+            _check_admin_states(frozenset({state}), Access.USER, handler.__qualname__)
             self.albums[state] = handler
             return handler
         return register
 
-    def callback(self, prefix: str, *, admin: bool = False):
+    def callback(self, prefix: str, *, access: Access = Access.USER):
         def register(handler: CallbackHandler) -> CallbackHandler:
-            self.callbacks[prefix] = CallbackRoute(handler, admin)
+            self.callbacks[prefix] = CallbackRoute(handler, access)
             return handler
         return register
 

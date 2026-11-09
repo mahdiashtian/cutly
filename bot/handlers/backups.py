@@ -6,7 +6,7 @@ from pathlib import Path
 
 from bot import keyboards, texts
 from bot.keyboards import Btn
-from bot.router import Context, Router
+from bot.router import Access, Context, Router
 from bot.states import State
 
 router = Router()
@@ -14,26 +14,26 @@ PANEL = {State.ADMIN_PANEL}
 RESTORE_STATES = frozenset({State.RESTORE_UPLOAD, State.RESTORE_WAITING, State.RESTORE_CONFIRM})
 
 
-@router.text(Btn.FULL_BACKUP, admin=True, states=PANEL)
+@router.text(Btn.FULL_BACKUP, access=Access.OWNER, states=PANEL)
 async def full_backup(ctx: Context) -> None:
     await ctx.app.tasks.full_backup(ctx.user_id)
     await ctx.reply(texts.BACKUP_STARTED, buttons=keyboards.ADMIN)
 
 
-@router.text(Btn.DATA_BACKUP, admin=True, states=PANEL)
+@router.text(Btn.DATA_BACKUP, access=Access.OWNER, states=PANEL)
 async def data_backup(ctx: Context) -> None:
     await ctx.app.tasks.data_backup(ctx.user_id)
     await ctx.reply(texts.BACKUP_STARTED, buttons=keyboards.ADMIN)
 
 
-@router.text(Btn.RESTORE, admin=True, states=PANEL)
+@router.text(Btn.RESTORE, access=Access.OWNER, states=PANEL)
 async def ask_restore(ctx: Context) -> None:
     await discard_staged_restore(ctx)
     await ctx.go(State.RESTORE_UPLOAD)
     await ctx.reply(texts.ASK_RESTORE_FILE, buttons=keyboards.BACK)
 
 
-@router.state(State.RESTORE_UPLOAD, admin=True)
+@router.state(State.RESTORE_UPLOAD, access=Access.OWNER)
 async def receive_backup(ctx: Context) -> None:
     document = ctx.message.document
     if document is None:
@@ -51,7 +51,7 @@ async def receive_backup(ctx: Context) -> None:
     await ctx.app.tasks.stage_restore(ctx.user_id, str(path))
 
 
-@router.text(Btn.CONFIRM_RESTORE, admin=True, states={State.RESTORE_CONFIRM})
+@router.text(Btn.CONFIRM_RESTORE, access=Access.OWNER, states={State.RESTORE_CONFIRM})
 async def confirm_restore(ctx: Context) -> None:
     container = ctx.app.container
     staged = await container.staged_restores.pop(ctx.user_id)

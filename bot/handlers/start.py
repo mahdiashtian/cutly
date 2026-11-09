@@ -12,7 +12,7 @@ from bot.states import State, parent_of
 router = Router()
 
 
-@router.text("/start", join=True)
+@router.text("/start")
 async def start(ctx: Context) -> None:
     if ctx.args.startswith("get_"):
         await ctx.go(State.IDLE)
@@ -21,13 +21,13 @@ async def start(ctx: Context) -> None:
         await main_menu(ctx)
 
 
-@router.text(Btn.BACK, join=True)
+@router.text(Btn.BACK)
 async def back(ctx: Context) -> None:
     await discard_staged_restore(ctx)
     await MENUS[parent_of(ctx.state)](ctx)
 
 
-@router.text(Btn.ACCOUNT, join=True)
+@router.text(Btn.ACCOUNT)
 async def account(ctx: Context) -> None:
     sender = await ctx.event.get_sender()
     links = await ctx.app.container.links.count_owned(ctx.user_id)
@@ -38,12 +38,12 @@ async def account(ctx: Context) -> None:
     )
 
 
-@router.text(Btn.CREATOR, join=True)
+@router.text(Btn.CREATOR)
 async def creator(ctx: Context) -> None:
     await ctx.reply(texts.CREATOR.format(username=ctx.app.settings.creator_username), buttons=keyboards.MAIN)
 
 
-@router.state(State.IDLE, join=True)
+@router.state(State.IDLE)
 async def idle(ctx: Context) -> None:
     """Anything typed outside a flow shows the main menu."""
     await main_menu(ctx)

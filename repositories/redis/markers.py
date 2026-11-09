@@ -21,6 +21,33 @@ class ActivityThrottle:
         return bool(await self._redis.set(keys.activity_touch(user_id), "1", nx=True, ex=self._window))
 
 
+class RateLimiter:
+    """Fixed-window counter shared by every process.
+
+    ``SET NX EX`` starts a window only if none is running, then ``INCR`` counts
+    the hit; both go in one pipelined round trip and ``INCR`` keeps the TTL, so
+    the window always ends on time.
+    """
+
+    def __init__(self, redis: Redis, *, name: str, limit: int, window_seconds: int) -> None:
+        self._redis = redis
+        self._name = name
+        self.limit = limit
+        self._window = max(1, window_seconds)
+
+    async def hit(self, key: str | int) -> int:
+        """Count one attempt and return how many happened in this window."""
+        redis_key = keys.rate_limit(self._name, key)
+        pipe = self._redis.pipeline(transaction=True)
+        pipe.set(redis_key, 0, ex=self._window, nx=True)
+        pipe.incr(redis_key)
+        _, count = await pipe.execute()
+        return int(count)
+
+    async def reset(self, key: str | int) -> None:
+        await self._redis.delete(keys.rate_limit(self._name, key))
+
+
 class JoinedChannelsMarker:
     """Caches only the *positive* answer "is in every mandatory channel".
 

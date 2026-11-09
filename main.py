@@ -55,6 +55,8 @@ async def run() -> None:
     setup_logging(settings.log_level)
     _require(settings)
 
+    if settings.admin_master is None:
+        log.warning("ADMIN_MASTER is not set: owner-only features (admins, backups, restore) are disabled")
     container = Container(settings)
     await container.startup()
     workers = ProcessGroup(celery_processes(settings) if settings.embedded_workers else [])

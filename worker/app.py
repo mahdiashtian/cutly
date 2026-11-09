@@ -23,6 +23,10 @@ def create_celery(settings: Settings) -> Celery:
         # the 30-second message deletions.
         task_routes={TaskName.RUN_BROADCAST: {"queue": BROADCAST_QUEUE}},
         task_ignore_result=True,
+        # JSON only: a pickle payload smuggled into the broker can never be
+        # deserialised into code.
+        task_serializer="json",
+        accept_content=["json"],
         # Only idempotent tasks opt in to late acks (see worker.tasks).
         task_acks_late=False,
         worker_prefetch_multiplier=1,

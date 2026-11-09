@@ -6,11 +6,16 @@ import os
 from dataclasses import dataclass, field
 from itertools import count
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 os.environ.update(API_ID="1", API_HASH="test", BOT_TOKEN="1:test", ENVIRONMENT="test")
 
+from bot.app import BotApp  # noqa: E402
+from bot.dispatcher import Dispatcher  # noqa: E402
+from bot.handlers import build_router, upload  # noqa: E402
+from bot.media import MediaRef  # noqa: E402
 from container import Container  # noqa: E402
 from core.config import Settings  # noqa: E402
 from core.enums import MediaType  # noqa: E402
@@ -62,7 +67,16 @@ class FakeClient:
     edits: list[tuple[int, str]] = field(default_factory=list)
     forwarded: list[tuple[object, object]] = field(default_factory=list)
     fail_for: dict[int, Exception] = field(default_factory=dict)
+    # Users who are members of every mandatory channel (None: everybody is).
+    members: set[int] | None = None
     _ids: count = field(default_factory=lambda: count(1))
+
+    async def get_permissions(self, channel, user_id):
+        if self.members is not None and user_id not in self.members:
+            from telethon.errors import UserNotParticipantError
+
+            raise UserNotParticipantError(request=None)
+        return object()
 
     def _record(self, chat, **kwargs) -> SentMessage:
         chat_id = getattr(chat, "user_id", chat)
@@ -94,3 +108,51 @@ class FakeClient:
 
     def texts_to(self, chat_id: int) -> list[str]:
         return [message.text for message in self.sent if message.chat_id == chat_id]
+
+
+# ---- the whole bot (dispatcher + router + services) with Telegram faked ----
+OWNER, VIEWER, ADMIN = 10, 20, 1  # ADMIN is ADMIN_MASTER in make_settings()
+
+
+@dataclass
+class RecordingQueue:
+    calls: list[tuple] = field(default_factory=list)
+
+    def __getattr__(self, name):
+        async def record(*args):
+            self.calls.append((name, *args))
+        return record
+
+
+@dataclass
+class FakeEvent:
+    sender_id: int
+    raw_text: str = ""
+    message: SimpleNamespace = None
+    is_private: bool = True
+
+    async def get_sender(self):
+        return SimpleNamespace(first_name="Ali", username="ali")
+
+
+def message(message_id=1, media=None):
+    return SimpleNamespace(id=message_id, grouped_id=None, media=media, input_sender=None, document=None)
+
+
+@pytest.fixture
+def bot(container, monkeypatch):
+    client, queue = FakeClient(), RecordingQueue()
+    app = BotApp(container, client, queue, username="cutly_bot")
+    dispatcher = Dispatcher(app, build_router())
+    refs = iter(range(500, 600))
+    monkeypatch.setattr(upload, "extract_media", lambda msg: msg.media and MediaRef(
+        MediaType.PHOTO, 2048, next(refs), 1, b"ref"))
+
+    async def say(user_id: int, text: str = "", media=None):
+        await dispatcher._handle_message(FakeEvent(user_id, text, message(media=media)))
+        return client.texts_to(user_id)[-1] if client.texts_to(user_id) else None
+
+    return SimpleNamespace(app=app, client=client, queue=queue, say=say, container=container,
+                           dispatcher=dispatcher)
+
+

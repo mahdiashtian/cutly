@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 
 from bot import keyboards, texts
+from bot.handlers.menus import valid_code
 from bot.router import Context, Router
 from bot.states import State
 from schemas.link import LinkDTO
@@ -29,7 +30,8 @@ def fit_caption(body: str, footer: str) -> str:
 
 
 async def open_link(ctx: Context, code: str) -> None:
-    link = await ctx.app.container.links.get(code)
+    code = valid_code(code)
+    link = await ctx.app.container.links.get(code) if code else None
     if link is None:
         await ctx.reply(texts.LINK_NOT_FOUND, buttons=keyboards.MAIN)
         return
@@ -45,15 +47,22 @@ async def open_link(ctx: Context, code: str) -> None:
 
 @router.state(State.LINK_PASSWORD)
 async def link_password(ctx: Context) -> None:
-    links = ctx.app.container.links
-    link = await links.get(ctx.data.get("code", ""))
+    container = ctx.app.container
+    link = await container.links.get(ctx.data.get("code", ""))
     if link is None:
         await ctx.go(State.IDLE)
         await ctx.reply(texts.LINK_NOT_FOUND, buttons=keyboards.MAIN)
         return
-    if not await links.check_password(link, ctx.text):
+    # Counted before checking, so a locked-out guesser costs no scrypt work.
+    attempts = container.password_limiter
+    attempt_key = f"{ctx.user_id}:{link.id}"
+    if await attempts.hit(attempt_key) > attempts.limit:
+        await ctx.reply(texts.TOO_MANY_ATTEMPTS, buttons=keyboards.MAIN)
+        return
+    if not await container.links.check_password(link, ctx.text):
         await ctx.reply(texts.WRONG_PASSWORD, buttons=keyboards.BACK)
         return
+    await attempts.reset(attempt_key)
     await ctx.go(State.IDLE)
     await deliver(ctx, link)
 

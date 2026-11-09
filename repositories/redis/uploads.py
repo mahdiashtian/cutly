@@ -23,13 +23,21 @@ class UploadSessionStore:
     async def start(self, user_id: int) -> None:
         await self._redis.delete(keys.upload_session(user_id))
 
-    async def add(self, user_id: int, items: list[MediaItem]) -> int:
-        """Append items and return the session's new size."""
+    async def add(self, user_id: int, items: list[MediaItem], *, limit: int) -> int | None:
+        """Append items; return the new size, or ``None`` if that would exceed ``limit``.
+
+        Checking before appending would race with a concurrent upload, so the
+        items are appended first and, if the list grew past the limit, trimmed
+        back. RPUSH puts them at the tail, so exactly the overflow is removed.
+        """
         key = keys.upload_session(user_id)
         pipe = self._redis.pipeline(transaction=True)
         pipe.rpush(key, *(item.model_dump_json() for item in items))
         pipe.expire(key, self._ttl)
         size, _ = await pipe.execute()
+        if size > limit:
+            await self._redis.ltrim(key, 0, limit - 1)
+            return None
         return int(size)
 
     async def items(self, user_id: int) -> list[MediaItem]:

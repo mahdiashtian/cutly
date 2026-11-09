@@ -7,7 +7,7 @@ from bot import keyboards, texts
 from bot.app import BotApp
 from bot.handlers.menus import admin_menu, parse_positive_int
 from bot.keyboards import Btn
-from bot.router import CallbackContext, Context, Router
+from bot.router import Access, CallbackContext, Context, Router
 from bot.states import State
 
 router = Router()
@@ -17,30 +17,30 @@ LOG_PAGE_SIZE = 10
 _ENTITY_CONCURRENCY = 5
 
 
-@router.text("/admin", admin=True)
+@router.text("/admin", access=Access.ADMIN)
 async def open_panel(ctx: Context) -> None:
     await admin_menu(ctx)
 
 
 # ---- admins ----
-@router.text(Btn.ADD_ADMIN, admin=True, states=PANEL)
+@router.text(Btn.ADD_ADMIN, access=Access.OWNER, states=PANEL)
 async def ask_add_admin(ctx: Context) -> None:
     await ctx.go(State.ADMIN_ADD)
     await ctx.reply(texts.ASK_ADMIN_ID_ADD, buttons=keyboards.BACK)
 
 
-@router.text(Btn.REMOVE_ADMIN, admin=True, states=PANEL)
+@router.text(Btn.REMOVE_ADMIN, access=Access.OWNER, states=PANEL)
 async def ask_remove_admin(ctx: Context) -> None:
     await ctx.go(State.ADMIN_REMOVE)
     await ctx.reply(texts.ASK_ADMIN_ID_REMOVE, buttons=keyboards.BACK)
 
 
-@router.state(State.ADMIN_ADD, admin=True)
+@router.state(State.ADMIN_ADD, access=Access.OWNER)
 async def add_admin(ctx: Context) -> None:
     await _set_admin(ctx, True, texts.ADMIN_ADDED)
 
 
-@router.state(State.ADMIN_REMOVE, admin=True)
+@router.state(State.ADMIN_REMOVE, access=Access.OWNER)
 async def remove_admin(ctx: Context) -> None:
     await _set_admin(ctx, False, texts.ADMIN_REMOVED)
 
@@ -56,7 +56,7 @@ async def _set_admin(ctx: Context, value: bool, success: str) -> None:
         await ctx.reply(texts.USER_NOT_FOUND, buttons=keyboards.BACK)
 
 
-@router.text(Btn.LIST_ADMINS, admin=True, states=PANEL)
+@router.text(Btn.LIST_ADMINS, access=Access.ADMIN, states=PANEL)
 async def list_admins(ctx: Context) -> None:
     ids = await ctx.app.container.users.admin_ids()
     limit = asyncio.Semaphore(_ENTITY_CONCURRENCY)
@@ -75,19 +75,19 @@ async def list_admins(ctx: Context) -> None:
 
 
 # ---- statistics ----
-@router.text(Btn.STATS, admin=True, states=PANEL)
+@router.text(Btn.STATS, access=Access.ADMIN, states=PANEL)
 async def stats(ctx: Context) -> None:
     await ctx.reply(texts.STATS.format(s=await ctx.app.container.stats.dashboard()), buttons=keyboards.ADMIN)
 
 
 # ---- per-user access log ----
-@router.text(Btn.USER_LOG, admin=True, states=PANEL)
+@router.text(Btn.USER_LOG, access=Access.ADMIN, states=PANEL)
 async def ask_user_log(ctx: Context) -> None:
     await ctx.go(State.USER_LOG_ID)
     await ctx.reply(texts.ASK_USER_LOG_ID, buttons=keyboards.BACK)
 
 
-@router.state(State.USER_LOG_ID, admin=True)
+@router.state(State.USER_LOG_ID, access=Access.ADMIN)
 async def user_log(ctx: Context) -> None:
     user_id = parse_positive_int(ctx.text)
     if user_id is None:
@@ -98,7 +98,7 @@ async def user_log(ctx: Context) -> None:
     await ctx.reply(text, buttons=buttons or keyboards.ADMIN)
 
 
-@router.callback("userlog", admin=True)
+@router.callback("userlog", access=Access.ADMIN)
 async def user_log_page(ctx: CallbackContext) -> None:
     user_id, page = (int(arg) for arg in ctx.args)
     text, buttons = await _user_log_page(ctx.app, user_id, page)

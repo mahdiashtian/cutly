@@ -11,7 +11,7 @@ from datetime import datetime
 from bot import keyboards, texts
 from bot.handlers.menus import admin_menu
 from bot.keyboards import Btn
-from bot.router import Context, Router
+from bot.router import Access, Context, Router
 from bot.states import State
 from core.clock import parse_local, utcnow
 from core.enums import BroadcastAudience, BroadcastMode
@@ -27,19 +27,19 @@ _AUDIENCES = {
 }
 
 
-@router.text(Btn.FORWARD_ALL, admin=True, states={State.ADMIN_PANEL})
+@router.text(Btn.FORWARD_ALL, access=Access.ADMIN, states={State.ADMIN_PANEL})
 async def ask_forward(ctx: Context) -> None:
     await ctx.go(State.BROADCAST_CONTENT, mode=BroadcastMode.FORWARD)
     await ctx.reply(texts.ASK_BROADCAST_FORWARD, buttons=keyboards.BACK)
 
 
-@router.text(Btn.COPY_ALL, admin=True, states={State.ADMIN_PANEL})
+@router.text(Btn.COPY_ALL, access=Access.ADMIN, states={State.ADMIN_PANEL})
 async def ask_copy(ctx: Context) -> None:
     await ctx.go(State.BROADCAST_CONTENT, mode=BroadcastMode.COPY)
     await ctx.reply(texts.ASK_BROADCAST_COPY, buttons=keyboards.BACK)
 
 
-@router.state(State.BROADCAST_CONTENT, admin=True)
+@router.state(State.BROADCAST_CONTENT, access=Access.ADMIN)
 async def content(ctx: Context) -> None:
     if ctx.message.grouped_id:
         await ctx.reply(texts.BROADCAST_NO_ALBUM, buttons=keyboards.BACK)
@@ -48,7 +48,7 @@ async def content(ctx: Context) -> None:
     await ctx.reply(texts.ASK_AUDIENCE, buttons=keyboards.BROADCAST_AUDIENCE)
 
 
-@router.state(State.BROADCAST_AUDIENCE, admin=True)
+@router.state(State.BROADCAST_AUDIENCE, access=Access.ADMIN)
 async def audience(ctx: Context) -> None:
     chosen = _AUDIENCES.get(ctx.text)
     if chosen is None:
@@ -60,7 +60,7 @@ async def audience(ctx: Context) -> None:
         await _preview(ctx, chosen, channel_ref=None)
 
 
-@router.state(State.BROADCAST_CHANNEL, admin=True)
+@router.state(State.BROADCAST_CHANNEL, access=Access.ADMIN)
 async def channel(ctx: Context) -> None:
     try:
         await ctx.app.client.get_entity(chat_peer(ctx.text))
@@ -88,7 +88,7 @@ async def _preview(ctx: Context, chosen: BroadcastAudience, *, channel_ref: str 
     )
 
 
-@router.text(Btn.SEND_NOW, admin=True, states={State.BROADCAST_CONFIRM})
+@router.text(Btn.SEND_NOW, access=Access.ADMIN, states={State.BROADCAST_CONFIRM})
 async def send_now(ctx: Context) -> None:
     broadcasts = ctx.app.container.broadcasts
     busy = await broadcasts.has_running()
@@ -98,13 +98,13 @@ async def send_now(ctx: Context) -> None:
     await admin_menu(ctx)
 
 
-@router.text(Btn.SCHEDULE, admin=True, states={State.BROADCAST_CONFIRM})
+@router.text(Btn.SCHEDULE, access=Access.ADMIN, states={State.BROADCAST_CONFIRM})
 async def ask_schedule(ctx: Context) -> None:
     await ctx.go(State.BROADCAST_SCHEDULE, **ctx.data)
     await ctx.reply(texts.ASK_SCHEDULE, buttons=keyboards.BACK)
 
 
-@router.state(State.BROADCAST_SCHEDULE, admin=True)
+@router.state(State.BROADCAST_SCHEDULE, access=Access.ADMIN)
 async def schedule(ctx: Context) -> None:
     zone = ctx.app.settings.timezone
     try:
@@ -119,7 +119,7 @@ async def schedule(ctx: Context) -> None:
     await ctx.reply(texts.BROADCAST_SCHEDULED.format(when=ctx.app.local_time(when)), buttons=keyboards.ADMIN)
 
 
-@router.text(Btn.CANCEL_BROADCAST, admin=True)
+@router.text(Btn.CANCEL_BROADCAST, access=Access.ADMIN)
 async def cancel(ctx: Context) -> None:
     """Drops the draft, cancels pending jobs and asks a running one to stop."""
     affected = await ctx.app.container.broadcasts.cancel_active()

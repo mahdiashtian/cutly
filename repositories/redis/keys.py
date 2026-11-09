@@ -70,3 +70,7 @@ def maintenance() -> str:
 # ---- ops tier ----
 def activity_touch(user_id: int) -> str:
     return f"{OPS_NAMESPACE}:activity:{user_id}"
+
+
+def rate_limit(name: str, key: str | int) -> str:
+    return f"{OPS_NAMESPACE}:rate:{name}:{key}"

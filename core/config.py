@@ -65,6 +65,15 @@ class Settings(BaseSettings):
     # every message; broadcast segments only need day-level precision.
     activity_touch_seconds: int = 300
 
+    # ---- Abuse protection ----
+    # Updates one user may send per window; extra ones are dropped (one notice).
+    user_rate_limit: int = 30
+    user_rate_window_seconds: int = 10
+    # Wrong passwords allowed per user and link per window (brute-force guard;
+    # it also caps how much scrypt CPU one user can make the bot spend).
+    password_attempts: int = 5
+    password_window_seconds: int = 900
+
     # ---- Background workers ----
     # True: ``python main.py`` also starts the Celery worker and beat processes.
     # Set False when they run as separate services (e.g. several worker hosts).

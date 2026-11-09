@@ -21,7 +21,7 @@ from telethon.tl.types import (
 from bot.keyboards import Btn
 from bot.media import extract_media
 from bot.membership import MembershipGuard
-from bot.router import Router
+from bot.router import Access, Router
 from bot.states import State, parent_of
 from core.enums import MediaType
 
@@ -58,7 +58,7 @@ def test_router_prefers_state_scoped_routes_and_ignores_misplaced_labels():
     @router.text("x", states={State.UPLOADING})
     async def while_uploading(ctx): ...
 
-    @router.text("only-admin-panel", states={State.ADMIN_PANEL})
+    @router.text("only-admin-panel", access=Access.ADMIN, states={State.ADMIN_PANEL})
     async def panel(ctx): ...
 
     @router.state(State.CAPTION_TEXT)

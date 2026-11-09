@@ -1,24 +1,26 @@
 """Turns Telethon updates into handler calls.
 
-Per private message: maintenance check -> load the conversation once -> resolve
-a route -> make sure the user exists (and record activity) -> admin / forced
-join checks -> call the handler. Telethon runs each update in its own task, so a
-slow handler never delays other users.
+Every update — message, album or button tap — goes through the same gate:
+maintenance check -> per-user flood limit -> make sure the user exists ->
+access check (owner / admin / forced join) -> handler. Telethon runs each update
+in its own task, so a slow handler never delays other users.
 """
 from __future__ import annotations
 
 import contextlib
 import logging
+from collections.abc import Awaitable, Callable
 
 from telethon import events
 
 from bot import texts
 from bot.app import BotApp
 from bot.membership import MembershipGuard, join_buttons
-from bot.router import CallbackContext, Context, Route, Router
+from bot.router import Access, CallbackContext, Context, Router
 from bot.states import State
 
 log = logging.getLogger(__name__)
+Notify = Callable[[str], Awaitable[object]]
 
 
 def _to_state(name: str | None) -> State:
@@ -40,6 +42,36 @@ class Dispatcher:
         client.add_event_handler(self._on_album, events.Album(func=lambda e: e.is_private))
         client.add_event_handler(self._on_callback, events.CallbackQuery())
 
+    # ---- the shared gate ----
+    async def _flooding(self, user_id: int, notify: Notify) -> bool:
+        """True when this user exceeded the per-user rate; they are told once."""
+        limiter = self._app.container.flood_limiter
+        count = await limiter.hit(user_id)
+        if count == limiter.limit + 1:
+            await notify(texts.TOO_FAST)
+        return count > limiter.limit
+
+    async def _allowed(self, user_id: int, access: Access, notify: Notify, start_payload: str = "") -> bool:
+        app = self._app
+        if access is Access.OWNER:
+            if app.container.users.is_owner(user_id):
+                return True
+            if await app.is_admin(user_id):  # strangers learn nothing about the panel
+                await notify(texts.OWNER_ONLY)
+            return False
+        if access is Access.ADMIN:
+            return await app.is_admin(user_id)
+        missing = await self._membership.missing_channels(user_id)
+        if missing:
+            await app.client.send_message(
+                user_id, texts.NEED_JOIN, buttons=join_buttons(missing, app.username, start_payload)
+            )
+            return False
+        return True
+
+    def _notify(self, user_id: int) -> Notify:
+        return lambda text: self._app.client.send_message(user_id, text)
+
     # ---- messages ----
     async def _on_message(self, event: events.NewMessage.Event) -> None:
         try:
@@ -49,14 +81,16 @@ class Dispatcher:
             await self._safe_reply(event.sender_id, texts.UNEXPECTED_ERROR)
 
     async def _handle_message(self, event: events.NewMessage.Event) -> None:
-        container = self._app.container
+        container, user_id = self._app.container, event.sender_id
         if await container.maintenance.is_on():
-            await self._app.client.send_message(event.sender_id, texts.MAINTENANCE)
+            await self._app.client.send_message(user_id, texts.MAINTENANCE)
             return
-        conversation = await container.conversations.get(event.sender_id)
+        conversation = await container.conversations.get(user_id)
         state = _to_state(conversation.state)
         if event.message.grouped_id and state is State.UPLOADING:
             return  # each album item also arrives here; the Album handler takes them together
+        if await self._flooding(user_id, self._notify(user_id)):
+            return
 
         text = (event.raw_text or "").strip()
         key, _, args = text.partition(" ") if text.startswith("/") else (text, "", "")
@@ -67,35 +101,26 @@ class Dispatcher:
             return
 
         context = Context(self._app, event, state, conversation.data, args.strip())
-        if await self._authorised(context, route):
+        input_sender = event.message.input_sender
+        await container.users.ensure(user_id, getattr(input_sender, "access_hash", None))
+        payload = context.args if context.args.startswith("get_") else ""
+        if await self._allowed(user_id, route.access, self._notify(user_id), payload):
             await route.handler(context)
-
-    async def _authorised(self, context: Context, route: Route) -> bool:
-        input_sender = context.message.input_sender
-        await self._app.container.users.ensure(context.user_id, getattr(input_sender, "access_hash", None))
-        if route.admin and not await self._app.is_admin(context.user_id):
-            return False
-        if route.require_join:
-            missing = await self._membership.missing_channels(context.user_id)
-            if missing:
-                payload = context.args if context.args.startswith("get_") else ""
-                await context.reply(texts.NEED_JOIN, buttons=join_buttons(missing, self._app.username, payload))
-                return False
-        return True
 
     # ---- albums ----
     async def _on_album(self, event: events.Album.Event) -> None:
         try:
-            container = self._app.container
+            container, user_id = self._app.container, event.sender_id
             if await container.maintenance.is_on():
                 return
-            conversation = await container.conversations.get(event.sender_id)
+            conversation = await container.conversations.get(user_id)
             state = _to_state(conversation.state)
             handler = self._router.albums.get(state)
-            if handler is None:
+            if handler is None or await self._flooding(user_id, self._notify(user_id)):
                 return
-            await container.users.ensure(event.sender_id)
-            await handler(Context(self._app, event, state, conversation.data), list(event.messages))
+            await container.users.ensure(user_id)
+            if await self._allowed(user_id, Access.USER, self._notify(user_id)):
+                await handler(Context(self._app, event, state, conversation.data), list(event.messages))
         except Exception:  # noqa: BLE001
             log.exception("album handler failed for user %s", event.sender_id)
             await self._safe_reply(event.sender_id, texts.UNEXPECTED_ERROR)
@@ -103,14 +128,23 @@ class Dispatcher:
     # ---- inline buttons ----
     async def _on_callback(self, event: events.CallbackQuery.Event) -> None:
         try:
+            user_id = event.sender_id
             prefix, *args = event.data.decode(errors="replace").split(":")
             route = self._router.callbacks.get(prefix)
             if route is None or await self._app.container.maintenance.is_on():
                 await event.answer()
                 return
+
+            async def notify(text: str):
+                return await event.answer(text, alert=True)
+
+            if await self._flooding(user_id, notify):
+                return
+            await self._app.container.users.ensure(user_id)
             # Inline keyboards live forever on old messages: re-check rights on every tap.
-            if route.admin and not await self._app.is_admin(event.sender_id):
-                await event.answer(texts.NO_ACCESS, alert=True)
+            if not await self._allowed(user_id, route.access, notify):
+                with contextlib.suppress(Exception):
+                    await event.answer(texts.NO_ACCESS, alert=True)
                 return
             await route.handler(CallbackContext(self._app, event, args))
         except Exception:  # noqa: BLE001

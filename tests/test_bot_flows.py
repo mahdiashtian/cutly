@@ -2,63 +2,10 @@
 with Telegram replaced by a recording fake."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from types import SimpleNamespace
-
-import pytest
-
 from bot import texts
-from bot.app import BotApp
-from bot.dispatcher import Dispatcher
-from bot.handlers import build_router, upload
 from bot.keyboards import Btn
-from bot.media import MediaRef
 from bot.states import State
-from core.enums import MediaType
-from tests.conftest import FakeClient
-
-OWNER, VIEWER, ADMIN = 10, 20, 1
-
-
-@dataclass
-class RecordingQueue:
-    calls: list[tuple] = field(default_factory=list)
-
-    def __getattr__(self, name):
-        async def record(*args):
-            self.calls.append((name, *args))
-        return record
-
-
-@dataclass
-class FakeEvent:
-    sender_id: int
-    raw_text: str = ""
-    message: SimpleNamespace = None
-    is_private: bool = True
-
-    async def get_sender(self):
-        return SimpleNamespace(first_name="Ali", username="ali")
-
-
-def message(message_id=1, media=None):
-    return SimpleNamespace(id=message_id, grouped_id=None, media=media, input_sender=None, document=None)
-
-
-@pytest.fixture
-def bot(container, monkeypatch):
-    client, queue = FakeClient(), RecordingQueue()
-    app = BotApp(container, client, queue, username="cutly_bot")
-    dispatcher = Dispatcher(app, build_router())
-    refs = iter(range(500, 600))
-    monkeypatch.setattr(upload, "extract_media", lambda msg: msg.media and MediaRef(
-        MediaType.PHOTO, 2048, next(refs), 1, b"ref"))
-
-    async def say(user_id: int, text: str = "", media=None):
-        await dispatcher._handle_message(FakeEvent(user_id, text, message(media=media)))
-        return client.texts_to(user_id)[-1] if client.texts_to(user_id) else None
-
-    return SimpleNamespace(app=app, client=client, queue=queue, say=say, container=container)
+from tests.conftest import ADMIN, OWNER, VIEWER
 
 
 async def _state(container, user_id):

@@ -59,8 +59,11 @@ class UserService(Service):
         async with self._uow() as uow:
             await uow.users.touch(user_id, utcnow())
 
+    def is_owner(self, user_id: int) -> bool:
+        return self._admin_master is not None and user_id == self._admin_master
+
     async def is_admin(self, user_id: int) -> bool:
-        if user_id == self._admin_master:
+        if self.is_owner(user_id):
             return True
         user = await self.get(user_id)
         return bool(user and user.is_admin)

@@ -67,9 +67,9 @@ class RedisCache:
         except ValidationError:
             self._invalid(key, model.__name__)
 
-    async def _set_model(self, key: str, value: BaseDTO | None) -> None:
+    async def _set_model(self, key: str, value: BaseDTO | None, *, ttl: int | None = None) -> None:
         payload = NEGATIVE_MARKER if value is None else value.model_dump_json()
-        await self._redis.set(key, payload, ex=self._ttl)
+        await self._redis.set(key, payload, ex=ttl or self._ttl)
 
     async def _get_list(self, key: str, adapter: TypeAdapter[list[T]]) -> list[T]:
         raw = await self._get_raw(key)

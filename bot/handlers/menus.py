@@ -2,11 +2,16 @@
 handlers that open a menu and by «🔙 بازگشت»."""
 from __future__ import annotations
 
+import re
+
 from bot import keyboards, texts
 from bot.router import Context
 from bot.states import State
 
-MAX_CODE_LENGTH = 32
+# Share codes are generated alphanumeric strings; anything else is rejected
+# before it reaches the cache or the database.
+_CODE = re.compile(r"[A-Za-z0-9]{1,32}")
+MAX_PASSWORD_LENGTH = 128
 
 
 async def main_menu(ctx: Context) -> None:
@@ -54,7 +59,7 @@ MENUS = {
 
 def valid_code(text: str) -> str | None:
     code = text.strip()
-    return code if 0 < len(code) <= MAX_CODE_LENGTH else None
+    return code if _CODE.fullmatch(code) else None
 
 
 def parse_positive_int(text: str) -> int | None:

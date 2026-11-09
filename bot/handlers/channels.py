@@ -6,7 +6,7 @@ import re
 from bot import keyboards, texts
 from bot.handlers.menus import join_menu
 from bot.keyboards import Btn
-from bot.router import Context, Router
+from bot.router import Access, Context, Router
 from bot.states import State
 from schemas.channel import chat_peer
 
@@ -14,12 +14,12 @@ router = Router()
 _PUBLIC_REF = re.compile(r"@(\S+)")
 
 
-@router.text(Btn.JOIN_PANEL, admin=True, states={State.ADMIN_PANEL})
+@router.text(Btn.JOIN_PANEL, access=Access.ADMIN, states={State.ADMIN_PANEL})
 async def open_panel(ctx: Context) -> None:
     await join_menu(ctx)
 
 
-@router.text(Btn.LIST_CHANNELS, admin=True, states={State.JOIN_PANEL})
+@router.text(Btn.LIST_CHANNELS, access=Access.ADMIN, states={State.JOIN_PANEL})
 async def list_channels(ctx: Context) -> None:
     channels = await ctx.app.container.channels.list()
     text = texts.CHANNEL_LIST_TITLE + "".join(
@@ -28,13 +28,13 @@ async def list_channels(ctx: Context) -> None:
     await ctx.reply(text, buttons=keyboards.JOIN_PANEL)
 
 
-@router.text(Btn.ADD_CHANNEL, admin=True, states={State.JOIN_PANEL})
+@router.text(Btn.ADD_CHANNEL, access=Access.ADMIN, states={State.JOIN_PANEL})
 async def ask_add(ctx: Context) -> None:
     await ctx.go(State.CHANNEL_ADD)
     await ctx.reply(texts.ASK_CHANNEL_ADD, buttons=keyboards.BACK)
 
 
-@router.state(State.CHANNEL_ADD, admin=True)
+@router.state(State.CHANNEL_ADD, access=Access.ADMIN)
 async def add(ctx: Context) -> None:
     parsed = parse_channel(ctx.text)
     if parsed is None:
@@ -56,13 +56,13 @@ async def add(ctx: Context) -> None:
     await ctx.reply(texts.CHANNEL_ADDED, buttons=keyboards.JOIN_PANEL)
 
 
-@router.text(Btn.REMOVE_CHANNEL, admin=True, states={State.JOIN_PANEL})
+@router.text(Btn.REMOVE_CHANNEL, access=Access.ADMIN, states={State.JOIN_PANEL})
 async def ask_remove(ctx: Context) -> None:
     await ctx.go(State.CHANNEL_REMOVE)
     await ctx.reply(texts.ASK_CHANNEL_REMOVE, buttons=keyboards.BACK)
 
 
-@router.state(State.CHANNEL_REMOVE, admin=True)
+@router.state(State.CHANNEL_REMOVE, access=Access.ADMIN)
 async def remove(ctx: Context) -> None:
     if await ctx.app.container.channels.remove(ctx.text):
         await ctx.go(State.JOIN_PANEL)

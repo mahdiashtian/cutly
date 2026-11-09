@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from bot import keyboards, texts
 from bot.app import BotApp
-from bot.handlers.menus import valid_code
+from bot.handlers.menus import MAX_PASSWORD_LENGTH, valid_code
 from bot.keyboards import Btn
 from bot.router import CallbackContext, Context, Router
 from bot.states import State
@@ -40,7 +40,7 @@ async def _done(ctx: Context, message: str) -> None:
 
 
 # ---- delete ----
-@router.text(Btn.DELETE, join=True)
+@router.text(Btn.DELETE)
 async def ask_delete(ctx: Context) -> None:
     await _ask(ctx, State.DELETE_CODE, texts.ASK_CODE_DELETE)
 
@@ -57,7 +57,7 @@ async def delete(ctx: Context) -> None:
 
 
 # ---- caption ----
-@router.text(Btn.SET_CAPTION, join=True)
+@router.text(Btn.SET_CAPTION)
 async def ask_caption_code(ctx: Context) -> None:
     await _ask(ctx, State.CAPTION_CODE, texts.ASK_CODE_CAPTION)
 
@@ -76,7 +76,7 @@ async def caption_text(ctx: Context) -> None:
         await _done(ctx, texts.CAPTION_SET)
 
 
-@router.text(Btn.UNSET_CAPTION, join=True)
+@router.text(Btn.UNSET_CAPTION)
 async def ask_caption_remove(ctx: Context) -> None:
     await _ask(ctx, State.CAPTION_REMOVE_CODE, texts.ASK_CODE_CAPTION)
 
@@ -89,7 +89,7 @@ async def caption_remove(ctx: Context) -> None:
 
 
 # ---- password ----
-@router.text(Btn.SET_PASSWORD, join=True)
+@router.text(Btn.SET_PASSWORD)
 async def ask_password_code(ctx: Context) -> None:
     await _ask(ctx, State.PASSWORD_CODE, texts.ASK_CODE_PASSWORD)
 
@@ -105,12 +105,14 @@ async def password_code(ctx: Context) -> None:
 async def password_text(ctx: Context) -> None:
     if not ctx.text:
         await ctx.reply(texts.ASK_PASSWORD, buttons=keyboards.BACK)
+    elif len(ctx.text) > MAX_PASSWORD_LENGTH:
+        await ctx.reply(texts.PASSWORD_TOO_LONG.format(limit=MAX_PASSWORD_LENGTH), buttons=keyboards.BACK)
     elif link := await _owned_link(ctx, ctx.data.get("code", "")):
         await ctx.app.container.links.set_password(link, ctx.text)
         await _done(ctx, texts.PASSWORD_SET)
 
 
-@router.text(Btn.UNSET_PASSWORD, join=True)
+@router.text(Btn.UNSET_PASSWORD)
 async def ask_password_remove(ctx: Context) -> None:
     await _ask(ctx, State.PASSWORD_REMOVE_CODE, texts.ASK_CODE_PASSWORD)
 
@@ -123,7 +125,7 @@ async def password_remove(ctx: Context) -> None:
 
 
 # ---- tracking ----
-@router.text(Btn.TRACK, join=True)
+@router.text(Btn.TRACK)
 async def ask_track(ctx: Context) -> None:
     await _ask(ctx, State.TRACK_CODE, texts.ASK_CODE_TRACK)
 
@@ -154,7 +156,7 @@ async def track(ctx: Context) -> None:
 
 
 # ---- history (paginated with inline buttons, not one message per 5 links) ----
-@router.text(Btn.HISTORY, join=True)
+@router.text(Btn.HISTORY)
 async def history(ctx: Context) -> None:
     text, buttons = await _history_page(ctx.app, ctx.user_id, 0)
     await ctx.reply(text, buttons=buttons or keyboards.MAIN)

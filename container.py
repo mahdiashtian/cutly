@@ -23,7 +23,7 @@ from repositories.redis import keys
 from repositories.redis.base import delete_matching
 from repositories.redis.caches import ChannelCache, LinkCache, SettingsCache, UserCache
 from repositories.redis.conversations import ConversationStore
-from repositories.redis.markers import ActivityThrottle, JoinedChannelsMarker, MaintenanceFlag
+from repositories.redis.markers import ActivityThrottle, JoinedChannelsMarker, MaintenanceFlag, RateLimiter
 from repositories.redis.restores import StagedRestoreStore
 from repositories.redis.uploads import UploadSessionStore
 from services.backup import BackupService
@@ -79,6 +79,11 @@ class Container:
         self.staged_restores = StagedRestoreStore(state_redis)
         self.maintenance = MaintenanceFlag(state_redis)
         self.joined_marker = JoinedChannelsMarker(cache_redis, ttl_seconds=s.forced_join_cache_seconds)
+        # Abuse protection lives on the state Redis: an evicted counter would reset a limit.
+        self.flood_limiter = RateLimiter(state_redis, name="updates", limit=s.user_rate_limit,
+                                         window_seconds=s.user_rate_window_seconds)
+        self.password_limiter = RateLimiter(state_redis, name="password", limit=s.password_attempts,
+                                            window_seconds=s.password_window_seconds)
 
     def _connect_redis(self) -> tuple[Redis, Redis]:
         if self.settings.environment == "test":
